@@ -177,13 +177,13 @@ public final class TornadoAlignments {
 		// BioJava's linear aligners ignore the open penalty (it is 0 for a LINEAR SimpleGapPenalty)
 		int gop = linear ? 0 : gapPenalty.getOpenPenalty();
 		int gep = gapPenalty.getExtensionPenalty();
-		if (enc.nPairs() > 0 && TornadoSupport.useGpu(totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
+		if (enc.nPairs() > 0 && TornadoSupport.useGpu("alignment", totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
 			try {
 				synchronized (AFFINE) {
 					return (linear ? LINEAR : AFFINE).run(enc, gop, gep, local);
 				}
 			} catch (RuntimeException | Error e) {
-				TornadoSupport.disable(e);
+				TornadoSupport.disable("alignment", e);
 			}
 		}
 		return CpuAlignmentScores.allPairs(enc.seqs, enc.subs, enc.k, gop, gep, local);

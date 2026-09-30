@@ -138,11 +138,11 @@ public class TornadoAsaCalculator {
 	 * {@link CpuAsa} (single-threaded if nThreads &lt;= 1, as AsaCalculator).
 	 */
 	public double[] calculateAsas() {
-		if (TornadoSupport.useGpu(atomCoords.length, minGpuAtoms)) {
+		if (TornadoSupport.useGpu("asa", atomCoords.length, minGpuAtoms)) {
 			try {
 				return calculateAsasGpu();
 			} catch (RuntimeException | Error e) {
-				TornadoSupport.disable(e);
+				TornadoSupport.disable("asa", e);
 			}
 		}
 		return calculateAsasCpu();

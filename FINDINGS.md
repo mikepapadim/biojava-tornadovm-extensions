@@ -12,7 +12,8 @@ after one warm-up. The one-off kernel JIT (about 0.5 s per JVM) is excluded and 
   atom or pair on all 32 cores (`asa/CpuAsa`, `align/CpuAlignmentScores`; the library's own CPU path). This is the fair GPU-vs-CPU
   comparison. BioJava vs lean CPU shows how much BioJava leaves on the table in pure Java.
 
-**Correctness:** every run below checks the GPU result against BioJava's: per-atom ASA is bit-identical
+**Correctness:** every run below checks the GPU result against BioJava's (the alignment rows also include
+linear gap penalties in the tests): per-atom ASA is bit-identical
 (0 differing atoms) and alignment scores are identical integers. The lean CPU baselines are also exact.
 The 16 JUnit parity tests pass under TornadoVM (`scripts/test-gpu.sh`) and on a plain JVM (fallback).
 
@@ -75,6 +76,22 @@ a uniform length range; Pfam PF00104 is 283 ungapped family members (about 160 a
 * Guide trees built from the GPU scorers are identical (Newick string) to BioJava's (test on 60 Pfam
   sequences).
 
+## Backends and devices
+
+The same code and the same 20 parity tests, on the other TornadoVM backends available on this machine (OpenCL SDK
+`tornadovm-7.0.1-jdk21-opencl`; device picked with `-Dsw.scores.device=0:1` / `-Dasa.fused.device=...`):
+
+| Device (backend) | Parity tests | Alignment, 20k pairs (1.84 G cells) | Alignment, 500k pairs (61.8 G cells) | ASA |
+|---|---|---|---|---|
+| RTX 4090 (CUDA/PTX) | 20/20 exact | 17.2 ms, 107 GCUPS | 260 ms, 238 GCUPS | as above |
+| RTX 4090 (OpenCL) | 20/20 exact | 15.0 ms, 122 GCUPS | 230 ms, 269 GCUPS (65x lean CPU) | runs, exact |
+| Intel UHD 770 iGPU (OpenCL) | 20/20 exact | 3.28 s, 0.6 GCUPS | not run | no FP64: falls back to the CPU path |
+
+* On the 4090, OpenCL is 10-15% faster than CUDA/PTX for this integer kernel.
+* The Intel iGPU gives exact scores but is 5-10x slower than the 32-core CPU: not worth using. It lacks FP64,
+  so the ASA kernel is refused at compile time (`TornadoDeviceFP64NotSupported`); the library then runs ASA on
+  the CPU path, and keeps the alignment kernel on the iGPU (the fallback is per operation).
+
 ## Investigated and not included
 
 **CE structure alignment (jCE).** `CECalculator.initSumOfDistances` was ported; it gave the same
@@ -90,5 +107,6 @@ Not attempted.
 
 ## Not yet done
 * Identity/similarity scorer types (`*_IDENTITIES`, the MSA default) need a traceback on the GPU.
-* Other GPUs and backends (OpenCL, AMD, Intel, Apple) are not measured yet.
+* AMD and Apple GPUs are not measured yet. FP64-less devices would need an FP32 ASA kernel with an exact
+  re-check of the boundary cases.
 * JMH harness: the benchmarks are simple best-of-N timers.

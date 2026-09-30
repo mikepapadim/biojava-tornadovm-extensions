@@ -7,8 +7,8 @@ import org.slf4j.LoggerFactory;
  * Decides whether the TornadoVM path may be used at all.
  * <p>
  * The GPU path is used only when the program runs under the TornadoVM runtime (the {@code tornado} launcher) and the
- * system property {@code biojava.tornado} is not {@code off}. Otherwise every accelerated class falls back to the
- * stock BioJava implementation, so the same code runs everywhere.
+ * system property {@code biojava.tornado} is not {@code off}. Otherwise every accelerated class uses its exact CPU
+ * path, so the same code runs everywhere.
  */
 public final class TornadoSupport {
 
@@ -36,13 +36,16 @@ public final class TornadoSupport {
 	}
 
 	/**
+	 * @param kernel name of the accelerated operation (e.g. "asa")
 	 * @param work a size measure of the problem
 	 * @param threshold the minimum size for which the GPU is worth it
 	 * @return true if the GPU path should be taken for a problem of the given size
 	 */
-	public static boolean useGpu(long work, long threshold) {
-		return isEnabled() && (isForced() || work >= threshold);
+	public static boolean useGpu(String kernel, long work, long threshold) {
+		return isEnabled() && !FAILED.contains(kernel) && (isForced() || work >= threshold);
 	}
+
+	private static final java.util.Set<String> FAILED = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 	private static boolean isRuntimeAvailable() {
 		Boolean available = runtimeAvailable;
@@ -52,7 +55,7 @@ public final class TornadoSupport {
 				Class.forName("uk.ac.manchester.tornado.runtime.TornadoCoreRuntime");
 				available = true;
 			} catch (Throwable t) {
-				logger.info("TornadoVM runtime not found, using the BioJava CPU implementations");
+				logger.info("TornadoVM runtime not found, using the CPU paths");
 				available = false;
 			}
 			runtimeAvailable = available;
@@ -60,9 +63,15 @@ public final class TornadoSupport {
 		return available;
 	}
 
-	/** Called when a GPU execution failed: logs it and disables the GPU path for the rest of the run. */
-	public static void disable(Throwable cause) {
-		logger.warn("TornadoVM execution failed, falling back to the BioJava CPU implementations", cause);
-		runtimeAvailable = false;
+	/**
+	 * Called when a GPU execution of the given operation failed (e.g. the device lacks FP64): logs it and disables
+	 * the GPU path of that operation, and only that one, for the rest of the run.
+	 */
+	public static void disable(String kernel, Throwable cause) {
+		if (FAILED.add(kernel)) {
+			logger.warn("TornadoVM execution of {} failed, using its CPU path from now on: {}", kernel,
+					cause.toString());
+			logger.debug("TornadoVM failure", cause);
+		}
 	}
 }
