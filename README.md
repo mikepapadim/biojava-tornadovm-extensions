@@ -95,7 +95,7 @@ Started with plain `java` (no argument file), the same program runs on the lean 
 |---|---|---|
 | GPU from | 1,000 atoms | 1e7 DP cells in total (about 250 pairs of 200 aa) |
 | below that, or without TornadoVM | lean CPU path (`CpuAsa`), exact | lean CPU path (`CpuAlignmentScores`), exact |
-| delegated to BioJava | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER`; linear gap penalties |
+| delegated to BioJava | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER` |
 
 * `-Dbiojava.tornado=off` forces the CPU path, and `-Dbiojava.tornado=force` ignores the thresholds.
 * If a kernel fails (no device, out of memory, driver error), a warning is logged, the GPU path is

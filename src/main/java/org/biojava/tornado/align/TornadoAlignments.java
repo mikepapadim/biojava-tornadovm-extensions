@@ -32,10 +32,10 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * GPU versions of the all-pairs scoring entry points of {@link Alignments}.
  * <p>
  * Supports the {@link PairwiseSequenceScorerType#GLOBAL GLOBAL} (Needleman-Wunsch) and
- * {@link PairwiseSequenceScorerType#LOCAL LOCAL} (Smith-Waterman) score types with affine or constant gap penalties;
- * the scores are exactly BioJava's. Large inputs run on the GPU; small inputs, and runs without a TornadoVM runtime,
+ * {@link PairwiseSequenceScorerType#LOCAL LOCAL} (Smith-Waterman) score types with affine, constant
+ * and linear gap penalties; the scores are exactly BioJava's. Large inputs run on the GPU; small inputs, and runs without a TornadoVM runtime,
  * run the same score-only algorithm on all CPU cores ({@link CpuAlignmentScores}). Other score types (identities and
- * similarities need a traceback) and linear gap penalties use {@link Alignments}.
+ * similarities need a traceback) use {@link Alignments}.
  */
 public final class TornadoAlignments {
 
@@ -47,16 +47,16 @@ public final class TornadoAlignments {
 	/** Device memory budget for the DP row buffers of one batch, in bytes. */
 	static final long BUFFER_BUDGET = 1L << 30;
 
-	/** The shared GPU engine; its {@code run} is synchronized, so executions are serialised on the device. */
-	private static final Engine ENGINE = new Engine();
+	/** The shared GPU engines (affine and linear gaps); executions are serialised on the device. */
+	private static final Engine AFFINE = new Engine(false);
+	private static final Engine LINEAR = new Engine(true);
 
 	private TornadoAlignments() {
 	}
 
 	/** @return true if the given scorer type is computed on the GPU */
 	public static boolean isSupported(PairwiseSequenceScorerType type, GapPenalty gapPenalty) {
-		return (type == PairwiseSequenceScorerType.GLOBAL || type == PairwiseSequenceScorerType.LOCAL)
-				&& gapPenalty.getType() != GapPenalty.Type.LINEAR;
+		return type == PairwiseSequenceScorerType.GLOBAL || type == PairwiseSequenceScorerType.LOCAL;
 	}
 
 	/**
@@ -173,11 +173,15 @@ public final class TornadoAlignments {
 	static <S extends Sequence<C>, C extends Compound> int[] computeScores(List<S> sequences, boolean local,
 			GapPenalty gapPenalty, SubstitutionMatrix<C> subMatrix) {
 		Encoded enc = new Encoded(sequences, subMatrix);
-		int gop = gapPenalty.getOpenPenalty();
+		boolean linear = gapPenalty.getType() == GapPenalty.Type.LINEAR;
+		// BioJava's linear aligners ignore the open penalty (it is 0 for a LINEAR SimpleGapPenalty)
+		int gop = linear ? 0 : gapPenalty.getOpenPenalty();
 		int gep = gapPenalty.getExtensionPenalty();
 		if (enc.nPairs() > 0 && TornadoSupport.useGpu(totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
 			try {
-				return ENGINE.run(enc, gop, gep, local);
+				synchronized (AFFINE) {
+					return (linear ? LINEAR : AFFINE).run(enc, gop, gep, local);
+				}
 			} catch (RuntimeException | Error e) {
 				TornadoSupport.disable(e);
 			}
@@ -237,6 +241,7 @@ public final class TornadoAlignments {
 	 * does not fit.
 	 */
 	private static final class Engine {
+		private final boolean linear;
 		private int residueCapacity;
 		private int seqCapacity;
 		private int subsCapacity;
@@ -253,7 +258,11 @@ public final class TornadoAlignments {
 		private GridScheduler gridScheduler;
 		private TornadoExecutionPlan plan;
 
-		synchronized int[] run(Encoded enc, int gop, int gep, boolean local) {
+		Engine(boolean linear) {
+			this.linear = linear;
+		}
+
+		int[] run(Encoded enc, int gop, int gep, boolean local) {
 			int nSeq = enc.seqs.length;
 			int nPairs = enc.nPairs();
 			int totalResidues = 0;
@@ -353,8 +362,8 @@ public final class TornadoAlignments {
 			TaskGraph taskGraph = new TaskGraph("sw")
 					.transferToDevice(DataTransferMode.EVERY_EXECUTION, residues, seqStart, subs, pairQuery,
 							pairTarget, params)
-					.task("scores", SwKernels::alignmentScores, ctx, residues, seqStart, pairQuery, pairTarget, subs,
-							params, bufM, bufS0, bufS1, scores)
+					.task("scores", linear ? SwKernels::alignmentScoresLinear : SwKernels::alignmentScores, ctx,
+							residues, seqStart, pairQuery, pairTarget, subs, params, bufM, bufS0, bufS1, scores)
 					.transferToHost(DataTransferMode.EVERY_EXECUTION, scores);
 			worker = new WorkerGrid1D(batch);
 			worker.setLocalWork(SwKernels.GROUP_SIZE, 1, 1);

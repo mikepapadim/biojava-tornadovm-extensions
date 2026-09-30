@@ -51,7 +51,7 @@ class TornadoAlignmentsTest {
 	}
 
 	@ParameterizedTest
-	@CsvSource({ "GLOBAL,10,1", "LOCAL,10,1", "GLOBAL,8,0", "LOCAL,8,0", "GLOBAL,12,2", "LOCAL,3,3" })
+	@CsvSource({ "GLOBAL,10,1", "LOCAL,10,1", "GLOBAL,8,0", "LOCAL,8,0", "GLOBAL,12,2", "LOCAL,3,3", "GLOBAL,0,1", "LOCAL,0,1", "GLOBAL,0,4", "LOCAL,0,3" })
 	void scoresMatchBioJava(String type, int gop, int gep) throws Exception {
 		// ambiguity codes and U/O exercise compounds outside the 20 standard amino acids
 		List<ProteinSequence> seqs = random(40, 1, 300, "ACDEFGHIKLMNPQRSTVWYXBZUO", 7);

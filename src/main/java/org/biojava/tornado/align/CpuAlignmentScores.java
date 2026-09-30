@@ -38,6 +38,9 @@ public final class CpuAlignmentScores {
 
 	/** The alignment score of query q against target t. */
 	public static int score(int[] q, int[] t, int[] subs, int k, int gop, int gep, boolean local) {
+		if (gop == 0) {
+			return scoreLinear(q, t, subs, k, gep, local);
+		}
 		// as AlignerHelper: the lowest score that can still be extended without overflow
 		int min = Integer.MIN_VALUE - gop - gep;
 		int n = t.length;
@@ -92,5 +95,40 @@ public final class CpuAlignmentScores {
 			}
 		}
 		return local ? best : maxRow[n];
+	}
+
+	/** Linear gap penalty, as BioJava's linear {@code AlignerHelper.setScorePoint}: one state. */
+	static int scoreLinear(int[] q, int[] t, int[] subs, int k, int gep, boolean local) {
+		int n = t.length;
+		int[] h = new int[n + 1];
+		if (!local) {
+			for (int y = 1; y <= n; y++) {
+				h[y] = h[y - 1] + gep;
+			}
+		}
+		int best = 0;
+		for (int x = 1; x <= q.length; x++) {
+			int row = q[x - 1] * k;
+			int diag = h[0];
+			if (!local) {
+				h[0] = h[0] + gep;
+			}
+			int left = h[0];
+			for (int y = 1; y <= n; y++) {
+				int up = h[y];
+				int d = up + gep;
+				int ins = left + gep;
+				int sub = diag + subs[row + t[y - 1]];
+				int v = d >= sub && d >= ins ? d : (sub >= ins ? sub : ins);
+				if (local) {
+					v = Math.max(v, 0);
+					best = Math.max(best, v);
+				}
+				h[y] = v;
+				diag = up;
+				left = v;
+			}
+		}
+		return local ? best : h[n];
 	}
 }

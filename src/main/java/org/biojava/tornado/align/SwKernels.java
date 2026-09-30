@@ -168,4 +168,79 @@ public final class SwKernels {
 			}
 		}
 	}
+
+	/**
+	 * Same as {@link #alignmentScores} for a linear gap penalty (open penalty 0), as BioJava's linear
+	 * {@code AlignerHelper.setScorePoint}: a single state, {@code H = max(up + gep, left + gep, diag + sub)}. Only
+	 * {@code bufM} is used as the boundary row.
+	 */
+	public static void alignmentScoresLinear(KernelContext ctx, IntArray residues, IntArray seqStart,
+			IntArray pairQuery, IntArray pairTarget, IntArray subs, IntArray params, IntArray bufM, IntArray bufS0,
+			IntArray bufS1, IntArray scores) {
+		int p = ctx.globalIdx;
+		int lid = ctx.localIdx;
+		int[] left = ctx.allocateIntLocalArray(STRIP * GROUP_SIZE);
+		int[] diag = ctx.allocateIntLocalArray(STRIP * GROUP_SIZE);
+		int[] qrow = ctx.allocateIntLocalArray(STRIP * GROUP_SIZE);
+		int nPairs = params.get(P_PAIRS);
+		if (p < nPairs) {
+			int alphabet = params.get(P_ALPHABET);
+			int gep = params.get(P_GEP);
+			int local = params.get(P_LOCAL);
+			int stride = params.get(P_STRIDE);
+
+			int qBegin = seqStart.get(pairQuery.get(p));
+			int m = seqStart.get(pairQuery.get(p) + 1) - qBegin;
+			int tBegin = seqStart.get(pairTarget.get(p));
+			int n = seqStart.get(pairTarget.get(p) + 1) - tBegin;
+
+			// row 0: zeros (local), or 0, gep, 2*gep, ... (global)
+			int h = 0;
+			for (int y = 0; y <= n; y++) {
+				bufM.set(y * stride + p, h);
+				if (local == 0) {
+					h = h + gep;
+				}
+			}
+
+			int col0 = 0;
+			int best = 0;
+			for (int x0 = 0; x0 < m; x0 += STRIP) {
+				int rows = m - x0 < STRIP ? m - x0 : STRIP;
+				for (int r = 0; r < rows; r++) {
+					int slot = r * GROUP_SIZE + lid;
+					qrow[slot] = residues.get(qBegin + x0 + r) * alphabet;
+					// diagonal of the first cell: column 0 of the row above; left: column 0 of this row
+					diag[slot] = col0;
+					if (local == 0) {
+						col0 = col0 + gep;
+					}
+					left[slot] = col0;
+				}
+				bufM.set(p, col0);
+
+				for (int y = 1; y <= n; y++) {
+					int idx = y * stride + p;
+					int up = bufM.get(idx);
+					int t = residues.get(tBegin + y - 1);
+					for (int r = 0; r < rows; r++) {
+						int slot = r * GROUP_SIZE + lid;
+						int d = up + gep;
+						int ins = left[slot] + gep;
+						int sub = diag[slot] + subs.get(qrow[slot] + t);
+						int v = d >= sub && d >= ins ? d : (sub >= ins ? sub : ins);
+						if (local == 1) {
+							v = v <= 0 ? 0 : v;
+							best = v > best ? v : best;
+						}
+						diag[slot] = up;
+						left[slot] = v;
+						up = v;
+					}
+					bufM.set(idx, up);
+				}
+			}
+			scores.set(p, local == 1 ? best : bufM.get(n * stride + p));
+		}
+	}
 }
