@@ -1,4 +1,4 @@
-package org.biojava.tornado.bench;
+package org.biojava.tornado.asa;
 
 import java.util.Arrays;
 import java.util.stream.IntStream;
@@ -6,16 +6,28 @@ import java.util.stream.IntStream;
 import javax.vecmath.Point3d;
 
 /**
- * A lean CPU baseline for ASA: the same algorithm as the fused GPU kernel (cell grid, per-atom neighbour list sorted
- * by distance, early-exit occlusion test) on primitive arrays, one atom per task on all cores.
+ * ASA on the CPU with the same algorithm as the fused GPU kernel (cell grid, per-atom neighbour list sorted by
+ * distance, early-exit occlusion test) on primitive arrays. The per-atom results are bit-identical to
+ * {@code AsaCalculator}'s: same neighbour criterion, same sphere points, same double-precision operation order.
  */
-final class AsaLeanCpu {
+public final class CpuAsa {
 
-	private AsaLeanCpu() {
+	private CpuAsa() {
 	}
 
-	static double[] calculate(Point3d[] pts, double[] radii, double probe, int nPoints) {
+	/**
+	 * @param pts atom coordinates
+	 * @param radii van der Waals radii
+	 * @param probe probe radius
+	 * @param nPoints number of sphere points
+	 * @param parallel one task per atom on all cores if true, else single-threaded
+	 * @return the ASA of every atom
+	 */
+	public static double[] calculate(Point3d[] pts, double[] radii, double probe, int nPoints, boolean parallel) {
 		int n = pts.length;
+		if (n == 0) {
+			return new double[0];
+		}
 		double[] sphere = spherePoints(nPoints);
 		double maxR = Arrays.stream(radii).max().orElse(0);
 		double side = maxR + maxR + probe + probe;
@@ -41,7 +53,8 @@ final class AsaLeanCpu {
 		final int fnx = nx, fny = ny, fnz = nz;
 		double cons = 4.0 * Math.PI / nPoints;
 		double[] asas = new double[n];
-		IntStream.range(0, n).parallel().forEach(i -> {
+		IntStream atoms = IntStream.range(0, n);
+		(parallel ? atoms.parallel() : atoms).forEach(i -> {
 			double xi = c[3 * i], yi = c[3 * i + 1], zi = c[3 * i + 2];
 			double ri = probe + radii[i];
 			double[] nb = new double[4 * 64];

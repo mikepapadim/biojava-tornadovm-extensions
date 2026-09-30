@@ -9,7 +9,7 @@ after one warm-up. The one-off kernel JIT (about 0.5 s per JVM) is excluded and 
 * **BioJava**: the stock code, multi-threaded (`AsaCalculator` with 32 threads; `Alignments` runs the
   pairs on its 32-thread pool).
 * **Lean CPU**: the *same algorithm as the GPU kernel* in plain Java on primitive arrays, one task per
-  atom or pair on all 32 cores (`bench/AsaLeanCpu`, `bench/CpuScores`). This is the fair GPU-vs-CPU
+  atom or pair on all 32 cores (`asa/CpuAsa`, `align/CpuAlignmentScores`; the library's own CPU path). This is the fair GPU-vs-CPU
   comparison. BioJava vs lean CPU shows how much BioJava leaves on the table in pure Java.
 
 **Correctness:** every run below checks the GPU result against BioJava's: per-atom ASA is bit-identical
@@ -46,16 +46,16 @@ a uniform length range; Pfam PF00104 is 283 ungapped family members (about 160 a
 
 | Set | Pairs | DP cells | Type | BioJava (32 thr) | Lean CPU 32 | GPU | vs BioJava | vs lean CPU | GPU GCUPS |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|
-| 10 seqs, 100-300 aa | 45 | < 0.01 G | GLOBAL | 44 ms | 2.0 ms | 28 ms | 1.6x | 0.07x | 0.1 |
-| 40 seqs, 100-300 aa | 780 | 0.03 G | GLOBAL | 207 ms | 10.8 ms | 22 ms | 9.3x | 0.5x | 1.5 |
-| 200 seqs, 100-500 aa | 19,900 | 1.84 G | GLOBAL | 9.65 s | 379 ms | 59 ms | 163x | 6.4x | 31 |
-| 200 seqs, 100-500 aa | 19,900 | 1.84 G | LOCAL | 10.1 s | 285 ms | 58 ms | 174x | 4.9x | 32 |
-| Pfam PF00104 | 39,903 | 1.02 G | GLOBAL | 5.60 s | 205 ms | 48 ms | 117x | 4.3x | 21 |
-| Pfam PF00104 | 39,903 | 1.02 G | LOCAL | 6.59 s | 228 ms | 48 ms | 138x | 4.8x | 21 |
-| 1000 seqs, 200-500 aa | 499,500 | 61.8 G | GLOBAL | not run | 14.6 s | 616 ms | - | 23.6x | 100 |
-| 1000 seqs, 200-500 aa | 499,500 | 61.8 G | LOCAL | not run | 11.2 s | 557 ms | - | 20.1x | 111 |
-| 2000 seqs, 100-400 aa | 1,999,000 | 126 G | GLOBAL | not run | 30.0 s | 877 ms | - | 34.2x | 144 |
-| 2000 seqs, 100-400 aa | 1,999,000 | 126 G | LOCAL | not run | 22.2 s | 896 ms | - | 24.8x | 141 |
+| 40 seqs, 100-300 aa | 780 | 0.03 G | GLOBAL | 242 ms | 12.4 ms | 5.2 ms | 46x | 2.4x | 6 |
+| 40 seqs, 100-300 aa | 780 | 0.03 G | LOCAL | 245 ms | 6.8 ms | 6.2 ms | 40x | 1.1x | 5 |
+| 200 seqs, 100-500 aa | 19,900 | 1.84 G | GLOBAL | 9.72 s | 381 ms | 17.2 ms | 567x | 22x | 107 |
+| 200 seqs, 100-500 aa | 19,900 | 1.84 G | LOCAL | 10.2 s | 257 ms | 16.7 ms | 615x | 15x | 110 |
+| Pfam PF00104 | 39,903 | 1.02 G | GLOBAL | 6.04 s | 246 ms | 8.9 ms | 680x | 28x | 115 |
+| Pfam PF00104 | 39,903 | 1.02 G | LOCAL | 7.02 s | 199 ms | 10.0 ms | 705x | 20x | 102 |
+| 1000 seqs, 200-500 aa | 499,500 | 61.8 G | GLOBAL | not run | 12.7 s | 260 ms | - | 49x | 238 |
+| 1000 seqs, 200-500 aa | 499,500 | 61.8 G | LOCAL | not run | 9.1 s | 261 ms | - | 35x | 237 |
+| 2000 seqs, 100-400 aa | 1,999,000 | 126 G | GLOBAL | not run | 34.1 s | 608 ms | - | 56x | 208 |
+| 2000 seqs, 100-400 aa | 1,999,000 | 126 G | LOCAL | not run | 24.0 s | 609 ms | - | 39x | 207 |
 
 * BioJava was not run on the largest sets. At its measured ~0.19 GCUPS it would need an estimated
   5-11 minutes each; that is an extrapolation, not a measurement.
@@ -67,8 +67,11 @@ a uniform length range; Pfam PF00104 is 283 ungapped family members (about 160 a
   row lives in interleaved (coalesced) global buffers; the DP is strip-mined over 32 query rows with the
   per-row state in local memory. A naive one-row-at-a-time version reached only 7.5-9.6 GCUPS
   (0.8-2.2x the lean CPU). Strip height 8 gave 62-72 GCUPS, 16 gave 78-98 and 32 gave 83-144.
-* Small batches lose to the CPU: the fixed cost is about 20 ms per call, because the plan is currently rebuilt
-  per call and the batch is below the size that fills the GPU. Hence the 5e7-cell threshold.
+* The execution plan is persistent and capacity-padded, as for ASA, so a call costs ~4 ms of fixed overhead.
+  The GPU wins from about 1k pairs of 200 aa (0.03 G cells); below the 1e7-cell threshold the library runs
+  the lean CPU code (e.g. 45 pairs: CPU 1.5 ms vs GPU 3.9 ms).
+* History: the first version rebuilt its plan per call (~20 ms) and had an overflowing pair-sort key, which
+  scrambled the warp ordering; it measured 4-34x vs lean CPU. Fixing both gave the table above.
 * Guide trees built from the GPU scorers are identical (Newick string) to BioJava's (test on 60 Pfam
   sequences).
 
@@ -86,7 +89,6 @@ all-vs-all superposition: the QCP cross-covariance matrices of many models form 
 Not attempted.
 
 ## Not yet done
-* Persistent (cached) execution plan for the alignment path, as for ASA, to cut the ~20 ms per-call cost.
 * Identity/similarity scorer types (`*_IDENTITIES`, the MSA default) need a traceback on the GPU.
 * Other GPUs and backends (OpenCL, AMD, Intel, Apple) are not measured yet.
 * JMH harness: the benchmarks are simple best-of-N timers.

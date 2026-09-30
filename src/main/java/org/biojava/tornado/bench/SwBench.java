@@ -67,7 +67,7 @@ public class SwBench {
 				int[] leanScores = null;
 				for (int r = 0; r < 3; r++) {
 					long t0 = System.nanoTime();
-					leanScores = CpuScores.allPairs(codes, subs, kk, gaps.getOpenPenalty(), gaps.getExtensionPenalty(), type == PairwiseSequenceScorerType.LOCAL);
+					leanScores = org.biojava.tornado.align.CpuAlignmentScores.allPairs(codes, subs, kk, gaps.getOpenPenalty(), gaps.getExtensionPenalty(), type == PairwiseSequenceScorerType.LOCAL);
 					lean = Math.min(lean, (System.nanoTime() - t0) / 1e6);
 				}
 				System.setProperty(TornadoSupport.PROPERTY, "force");

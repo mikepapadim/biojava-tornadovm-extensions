@@ -14,12 +14,12 @@ On an RTX 4090 against a 32-thread i9-13900K (details and methodology in [FINDIN
 | Workload | vs BioJava today | vs the same algorithm in lean Java on all 32 cores |
 |---|---|---|
 | ASA, 59k to 2.4M atoms | **11-17x** | 2.3-3.4x |
-| All-pairs alignment scores, 20k to 2M pairs | **117-174x** (measured up to 40k pairs) | **4-34x** |
-| Small inputs (< ~2k atoms, < ~1k pairs) | still faster than BioJava | CPU is faster: stay on CPU |
+| All-pairs alignment scores, 20k to 2M pairs | **570-700x** (measured up to 40k pairs) | **15-56x** |
+| Small inputs (< ~1k pairs) | the library runs its lean CPU code: 4-6x (ASA), ~25x (alignment) faster than BioJava | - |
 
 BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a
-TornadoVM runtime, or for small inputs, every class calls the stock BioJava implementation, so the same
-code runs everywhere.
+TornadoVM runtime, or for small inputs, the classes run the same algorithms in lean Java on all cores. That
+is also exact, and already several times faster than BioJava, so the same code runs everywhere.
 
 ---
 
@@ -87,20 +87,21 @@ java @$TORNADO_SDK/tornado-argfile -cp my-app.jar:<dependencies> com.example.Mai
 # or, equivalently: $TORNADO_SDK/bin/tornado -cp ... com.example.Main
 ```
 
-Started with plain `java` (no argument file), the same program runs and uses the BioJava CPU code.
+Started with plain `java` (no argument file), the same program runs on the lean CPU path.
 
 ### When the GPU is used
 
 | | ASA | All-pairs scores |
 |---|---|---|
-| GPU from | 1,000 atoms | 5e7 DP cells in total (about 2k pairs of 150 aa) |
-| always CPU | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER`; linear gap penalties |
+| GPU from | 1,000 atoms | 1e7 DP cells in total (about 250 pairs of 200 aa) |
+| below that, or without TornadoVM | lean CPU path (`CpuAsa`), exact | lean CPU path (`CpuAlignmentScores`), exact |
+| delegated to BioJava | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER`; linear gap penalties |
 
 * `-Dbiojava.tornado=off` forces the CPU path, and `-Dbiojava.tornado=force` ignores the thresholds.
 * If a kernel fails (no device, out of memory, driver error), a warning is logged, the GPU path is
-  disabled for the rest of the run, and the call is answered by BioJava.
-* The first GPU call in a JVM compiles the kernel (about 0.5 s). ASA then re-executes a cached execution
-  plan (under 1 ms of overhead per call); all-pairs scoring currently builds its plan per call (about 20 ms).
+  disabled for the rest of the run, and the call is answered by the CPU path.
+* The first GPU call in a JVM compiles the kernel (about 0.5 s). Later calls re-execute a cached execution
+  plan, at about 1 ms (ASA) and 4 ms (alignment) of fixed overhead per call.
 * Thread safety: calls are serialised on the device and are safe from several threads.
 
 ---
@@ -114,7 +115,8 @@ src/main/java/org/biojava/tornado/
   asa/TornadoAsaCalculator   host side, persistent capacity-padded execution plan
   align/SwKernels.java       strip-mined affine-gap NW/SW score kernel (one pair per thread)
   align/TornadoAlignments    encoding, cost-sorted batching, PrecomputedScorer
-  bench/                     AsaBench, SwBench and the lean CPU baselines (AsaLeanCpu, CpuScores)
+  asa/CpuAsa, align/CpuAlignmentScores   lean exact CPU paths (fallback, and the fair baseline)
+  bench/                     AsaBench, SwBench
 src/test/java/               parity tests: GPU result == BioJava result, exactly
 ```
 
@@ -122,8 +124,8 @@ Principles, which any new kernel should follow:
 * **Exact parity.** The kernels reproduce BioJava's arithmetic: double precision in BioJava's
   operation order for ASA, and the same integer recurrences and boundary rules (`AlignerHelper`) for
   alignment. Tests compare with `assertArrayEquals(expected, actual, 0.0)`.
-* **Drop-in API and fallback.** Same constructors and methods as the BioJava class; delegate to BioJava
-  below a size threshold, without TornadoVM, and on any failure.
+* **Drop-in API and fallback.** Same constructors and methods as the BioJava class; below a size threshold,
+  without TornadoVM, and on any failure, run an exact CPU path.
 * **Fair benchmarks.** Report the speedup against BioJava *and* against the same algorithm in lean Java
   on all cores.
 

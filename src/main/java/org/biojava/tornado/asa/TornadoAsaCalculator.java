@@ -9,6 +9,7 @@ import javax.vecmath.Point3d;
 
 import org.biojava.nbio.structure.Atom;
 import org.biojava.nbio.structure.Calc;
+import org.biojava.nbio.structure.Element;
 import org.biojava.nbio.structure.Group;
 import org.biojava.nbio.structure.ResidueNumber;
 import org.biojava.nbio.structure.Structure;
@@ -44,13 +45,13 @@ public class TornadoAsaCalculator {
 	/** Below this many atoms the multi-threaded CPU implementation is used. */
 	public static final int DEFAULT_MIN_GPU_ATOMS = 1000;
 
-	private final AsaCalculator cpu;
 	private final Point3d[] atomCoords;
 	private final Atom[] atoms;
 	private final double[] radii;
 	private final double probe;
 	private final int nSpherePoints;
 	private final double cons;
+	private final int nThreads;
 
 	private int minGpuAtoms = DEFAULT_MIN_GPU_ATOMS;
 
@@ -71,7 +72,13 @@ public class TornadoAsaCalculator {
 
 	/** @see AsaCalculator#AsaCalculator(Atom[], double, int, int) */
 	public TornadoAsaCalculator(Atom[] atoms, double probe, int nSpherePoints, int nThreads) {
-		this.cpu = new AsaCalculator(atoms, probe, nSpherePoints, nThreads);
+		for (Atom atom : atoms) {
+			// as AsaCalculator
+			if (atom.getElement() == Element.H) {
+				throw new IllegalArgumentException("Can't calculate ASA for an array that contains Hydrogen atoms ");
+			}
+		}
+		this.nThreads = nThreads;
 		this.atoms = atoms;
 		this.atomCoords = Calc.atomsToPoints(atoms);
 		this.probe = probe;
@@ -85,7 +92,7 @@ public class TornadoAsaCalculator {
 
 	/** @see AsaCalculator#AsaCalculator(Point3d[], double, int, int, double) */
 	public TornadoAsaCalculator(Point3d[] atomCoords, double probe, int nSpherePoints, int nThreads, double radius) {
-		this.cpu = new AsaCalculator(atomCoords, probe, nSpherePoints, nThreads, radius);
+		this.nThreads = nThreads;
 		this.atoms = null;
 		this.atomCoords = atomCoords;
 		this.probe = probe;
@@ -126,17 +133,24 @@ public class TornadoAsaCalculator {
 		return asas.values().toArray(new GroupAsa[0]);
 	}
 
-	/** @see AsaCalculator#calculateAsas() */
+	/**
+	 * Same result as {@link AsaCalculator#calculateAsas()}: on the GPU for large structures, else with
+	 * {@link CpuAsa} (single-threaded if nThreads &lt;= 1, as AsaCalculator).
+	 */
 	public double[] calculateAsas() {
-		if (!TornadoSupport.useGpu(atomCoords.length, minGpuAtoms)) {
-			return cpu.calculateAsas();
+		if (TornadoSupport.useGpu(atomCoords.length, minGpuAtoms)) {
+			try {
+				return calculateAsasGpu();
+			} catch (RuntimeException | Error e) {
+				TornadoSupport.disable(e);
+			}
 		}
-		try {
-			return calculateAsasGpu();
-		} catch (RuntimeException | Error e) {
-			TornadoSupport.disable(e);
-			return cpu.calculateAsas();
-		}
+		return calculateAsasCpu();
+	}
+
+	/** Runs the CPU path ({@link CpuAsa}). */
+	public double[] calculateAsasCpu() {
+		return CpuAsa.calculate(atomCoords, radii, probe, nSpherePoints, nThreads > 1);
 	}
 
 	/** Runs the GPU path unconditionally (no threshold, no fallback). */
@@ -155,7 +169,7 @@ public class TornadoAsaCalculator {
 			if (counts.get(i) < 0) {
 				logger.info("Atom {} has more than {} neighbours, using the CPU implementation", i,
 						AsaKernels.LOCAL_CAPACITY);
-				return cpu.calculateAsas();
+				return calculateAsasCpu();
 			}
 		}
 		long t2 = System.nanoTime();

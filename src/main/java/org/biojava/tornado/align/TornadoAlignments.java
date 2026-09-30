@@ -33,18 +33,22 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
  * <p>
  * Supports the {@link PairwiseSequenceScorerType#GLOBAL GLOBAL} (Needleman-Wunsch) and
  * {@link PairwiseSequenceScorerType#LOCAL LOCAL} (Smith-Waterman) score types with affine or constant gap penalties;
- * the scores are exactly BioJava's. Other score types (identities and similarities need a traceback), linear gap
- * penalties, small inputs, and runs without a TornadoVM runtime use {@link Alignments}.
+ * the scores are exactly BioJava's. Large inputs run on the GPU; small inputs, and runs without a TornadoVM runtime,
+ * run the same score-only algorithm on all CPU cores ({@link CpuAlignmentScores}). Other score types (identities and
+ * similarities need a traceback) and linear gap penalties use {@link Alignments}.
  */
 public final class TornadoAlignments {
 
 	private static final Logger logger = LoggerFactory.getLogger(TornadoAlignments.class);
 
 	/** Below this many DP cells in total the CPU implementation is used. */
-	public static final long DEFAULT_MIN_GPU_CELLS = 50_000_000L;
+	public static final long DEFAULT_MIN_GPU_CELLS = 10_000_000L;
 
 	/** Device memory budget for the DP row buffers of one batch, in bytes. */
 	static final long BUFFER_BUDGET = 1L << 30;
+
+	/** The shared GPU engine; its {@code run} is synchronized, so executions are serialised on the device. */
+	private static final Engine ENGINE = new Engine();
 
 	private TornadoAlignments() {
 	}
@@ -61,20 +65,15 @@ public final class TornadoAlignments {
 	 */
 	public static <S extends Sequence<C>, C extends Compound> double[] getAllPairsScores(List<S> sequences,
 			PairwiseSequenceScorerType type, GapPenalty gapPenalty, SubstitutionMatrix<C> subMatrix) {
-		if (!isSupported(type, gapPenalty) || !TornadoSupport.useGpu(totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
+		if (!isSupported(type, gapPenalty)) {
 			return Alignments.getAllPairsScores(sequences, type, gapPenalty, subMatrix);
 		}
-		try {
-			int[] scores = computeScores(sequences, type == PairwiseSequenceScorerType.LOCAL, gapPenalty, subMatrix);
-			double[] out = new double[scores.length];
-			for (int k = 0; k < scores.length; k++) {
-				out[k] = scores[k];
-			}
-			return out;
-		} catch (RuntimeException | Error e) {
-			TornadoSupport.disable(e);
-			return Alignments.getAllPairsScores(sequences, type, gapPenalty, subMatrix);
+		int[] scores = computeScores(sequences, type == PairwiseSequenceScorerType.LOCAL, gapPenalty, subMatrix);
+		double[] out = new double[scores.length];
+		for (int k = 0; k < scores.length; k++) {
+			out[k] = scores[k];
 		}
+		return out;
 	}
 
 	/**
@@ -86,20 +85,14 @@ public final class TornadoAlignments {
 	public static <S extends Sequence<C>, C extends Compound> List<PairwiseSequenceScorer<S, C>> getAllPairsScorers(
 			List<S> sequences, PairwiseSequenceScorerType type, GapPenalty gapPenalty,
 			SubstitutionMatrix<C> subMatrix) {
-		if (!isSupported(type, gapPenalty) || !TornadoSupport.useGpu(totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
+		if (!isSupported(type, gapPenalty)) {
 			List<PairwiseSequenceScorer<S, C>> scorers = Alignments.getAllPairsScorers(sequences, type, gapPenalty,
 					subMatrix);
 			Alignments.runPairwiseScorers(scorers);
 			return scorers;
 		}
 		boolean local = type == PairwiseSequenceScorerType.LOCAL;
-		int[] scores;
-		try {
-			scores = computeScores(sequences, local, gapPenalty, subMatrix);
-		} catch (RuntimeException | Error e) {
-			TornadoSupport.disable(e);
-			return getAllPairsScorers(sequences, type, gapPenalty, subMatrix);
-		}
+		int[] scores = computeScores(sequences, local, gapPenalty, subMatrix);
 		int[] selfScores = new int[sequences.size()];
 		for (int i = 0; i < sequences.size(); i++) {
 			for (C c : sequences.get(i)) {
@@ -175,177 +168,206 @@ public final class TornadoAlignments {
 	}
 
 	/**
-	 * Encodes the sequences, orders the pairs by DP size (so that the threads of a warp do similar work) and runs
-	 * them in batches that fit the buffer budget.
+	 * Scores all pairs: on the GPU for large inputs, else with {@link CpuAlignmentScores}. Same result either way.
 	 */
 	static <S extends Sequence<C>, C extends Compound> int[] computeScores(List<S> sequences, boolean local,
 			GapPenalty gapPenalty, SubstitutionMatrix<C> subMatrix) {
-		int nSeq = sequences.size();
-		int nPairs = nSeq * (nSeq - 1) / 2;
-		int[] result = new int[nPairs];
-		if (nPairs == 0) {
+		Encoded enc = new Encoded(sequences, subMatrix);
+		int gop = gapPenalty.getOpenPenalty();
+		int gep = gapPenalty.getExtensionPenalty();
+		if (enc.nPairs() > 0 && TornadoSupport.useGpu(totalCells(sequences), DEFAULT_MIN_GPU_CELLS)) {
+			try {
+				return ENGINE.run(enc, gop, gep, local);
+			} catch (RuntimeException | Error e) {
+				TornadoSupport.disable(e);
+			}
+		}
+		return CpuAlignmentScores.allPairs(enc.seqs, enc.subs, enc.k, gop, gep, local);
+	}
+
+	/**
+	 * Sequences as alphabet codes. The alphabet is every distinct compound, scored with the matrix's own
+	 * {@code getValue}, so that unknown compounds get exactly the value BioJava gives them.
+	 */
+	static final class Encoded {
+		final int[][] seqs;
+		final int[] subs;
+		final int k;
+		final int maxLength;
+
+		<S extends Sequence<C>, C extends Compound> Encoded(List<S> sequences, SubstitutionMatrix<C> subMatrix) {
+			Map<C, Integer> codes = new HashMap<>();
+			List<C> alphabet = new ArrayList<>();
+			seqs = new int[sequences.size()][];
+			int longest = 0;
+			for (int i = 0; i < seqs.length; i++) {
+				S seq = sequences.get(i);
+				int[] enc = new int[seq.getLength()];
+				int pos = 0;
+				for (C c : seq) {
+					Integer code = codes.get(c);
+					if (code == null) {
+						code = alphabet.size();
+						codes.put(c, code);
+						alphabet.add(c);
+					}
+					enc[pos++] = code;
+				}
+				seqs[i] = enc;
+				longest = Math.max(longest, enc.length);
+			}
+			maxLength = longest;
+			k = alphabet.size();
+			subs = new int[Math.max(1, k * k)];
+			for (int a = 0; a < k; a++) {
+				for (int b = 0; b < k; b++) {
+					subs[a * k + b] = subMatrix.getValue(alphabet.get(a), alphabet.get(b));
+				}
+			}
+		}
+
+		int nPairs() {
+			return seqs.length * (seqs.length - 1) / 2;
+		}
+	}
+
+	/**
+	 * A persistent execution plan with buffers sized for a capacity (residues, sequences, alphabet, sequence
+	 * length), compiled once and re-executed for every batch of every call that fits; rebuilt larger when a call
+	 * does not fit.
+	 */
+	private static final class Engine {
+		private int residueCapacity;
+		private int seqCapacity;
+		private int subsCapacity;
+		private int lengthCapacity;
+		private int batch;
+		private IntArray residues;
+		private IntArray seqStart;
+		private IntArray subs;
+		private IntArray pairQuery;
+		private IntArray pairTarget;
+		private IntArray params;
+		private IntArray scores;
+		private WorkerGrid worker;
+		private GridScheduler gridScheduler;
+		private TornadoExecutionPlan plan;
+
+		synchronized int[] run(Encoded enc, int gop, int gep, boolean local) {
+			int nSeq = enc.seqs.length;
+			int nPairs = enc.nPairs();
+			int totalResidues = 0;
+			for (int[] s : enc.seqs) {
+				totalResidues += s.length;
+			}
+			if (plan == null || totalResidues > residueCapacity || nSeq + 1 > seqCapacity
+					|| enc.subs.length > subsCapacity || enc.maxLength + 1 > lengthCapacity) {
+				build(totalResidues, nSeq + 1, enc.subs.length, enc.maxLength + 1);
+			}
+			int pos = 0;
+			for (int i = 0; i < nSeq; i++) {
+				seqStart.set(i, pos);
+				for (int r : enc.seqs[i]) {
+					residues.set(pos++, r);
+				}
+			}
+			seqStart.set(nSeq, pos);
+			for (int i = 0; i < enc.subs.length; i++) {
+				subs.set(i, enc.subs[i]);
+			}
+			params.set(SwKernels.P_ALPHABET, enc.k);
+			params.set(SwKernels.P_GOP, gop);
+			params.set(SwKernels.P_GEP, gep);
+			params.set(SwKernels.P_LOCAL, local ? 1 : 0);
+			params.set(SwKernels.P_STRIDE, batch);
+
+			// pairs in BioJava's order, then sorted by decreasing DP size so that a warp does similar work
+			int[] queryOf = new int[nPairs];
+			int[] targetOf = new int[nPairs];
+			long[] keyed = new long[nPairs];
+			int idx = 0;
+			for (int i = 0; i < nSeq; i++) {
+				for (int j = i + 1; j < nSeq; j++) {
+					queryOf[idx] = i;
+					targetOf[idx] = j;
+					long cells = (long) enc.seqs[i].length * enc.seqs[j].length;
+					// high bits: DP size (descending), low 32 bits: pair index
+					keyed[idx] = (Integer.MAX_VALUE - Math.min(cells, Integer.MAX_VALUE)) << 32 | idx;
+					idx++;
+				}
+			}
+			Arrays.sort(keyed);
+			int[] order = new int[nPairs];
+			for (int p = 0; p < nPairs; p++) {
+				order[p] = (int) keyed[p];
+			}
+
+			int[] result = new int[nPairs];
+			for (int from = 0; from < nPairs; from += batch) {
+				int size = Math.min(batch, nPairs - from);
+				for (int p = 0; p < size; p++) {
+					pairQuery.set(p, queryOf[order[from + p]]);
+					pairTarget.set(p, targetOf[order[from + p]]);
+				}
+				params.set(SwKernels.P_PAIRS, size);
+				worker.setGlobalWork(roundUp(size), 1, 1);
+				long t0 = System.nanoTime();
+				plan.withGridScheduler(gridScheduler).execute();
+				if (Boolean.getBoolean("biojava.tornado.trace")) {
+					logger.info("sw: batch of {} pairs in {} ms", size, (System.nanoTime() - t0) / 1e6);
+				}
+				for (int p = 0; p < size; p++) {
+					result[order[from + p]] = scores.get(p);
+				}
+			}
 			return result;
 		}
 
-		// alphabet: every distinct compound, scored with the matrix's own getValue so that unknown compounds get
-		// exactly the value BioJava gives them
-		Map<C, Integer> codes = new HashMap<>();
-		List<C> alphabet = new ArrayList<>();
-		int[] seqStart = new int[nSeq + 1];
-		int maxLength = 0;
-		for (int i = 0; i < nSeq; i++) {
-			int length = sequences.get(i).getLength();
-			seqStart[i + 1] = seqStart[i] + length;
-			maxLength = Math.max(maxLength, length);
-		}
-		int[] residues = new int[Math.max(1, seqStart[nSeq])];
-		for (int i = 0; i < nSeq; i++) {
-			int pos = seqStart[i];
-			for (C c : sequences.get(i)) {
-				Integer code = codes.get(c);
-				if (code == null) {
-					code = alphabet.size();
-					codes.put(c, code);
-					alphabet.add(c);
-				}
-				residues[pos++] = code;
-			}
-		}
-		int k = alphabet.size();
-		int[] subs = new int[Math.max(1, k * k)];
-		for (int a = 0; a < k; a++) {
-			for (int b = 0; b < k; b++) {
-				subs[a * k + b] = subMatrix.getValue(alphabet.get(a), alphabet.get(b));
-			}
-		}
-
-		// pairs in BioJava's order, then sorted by decreasing DP size
-		long[] keyed = new long[nPairs];
-		int[] pairQuery = new int[nPairs];
-		int[] pairTarget = new int[nPairs];
-		int idx = 0;
-		for (int i = 0; i < nSeq; i++) {
-			for (int j = i + 1; j < nSeq; j++) {
-				pairQuery[idx] = i;
-				pairTarget[idx] = j;
-				long cells = (long) sequences.get(i).getLength() * sequences.get(j).getLength();
-				// high bits: DP size (descending), low bits: pair index
-				keyed[idx] = ((Long.MAX_VALUE >> 24) - Math.min(cells, Long.MAX_VALUE >> 24)) << 24 | idx;
-				idx++;
-			}
-		}
-		if (nPairs >= (1 << 24)) {
-			// the pair index no longer fits the sort key: skip the ordering
-			for (int p = 0; p < nPairs; p++) {
-				keyed[p] = p;
-			}
-		} else {
-			Arrays.sort(keyed);
-		}
-		int[] order = new int[nPairs];
-		for (int p = 0; p < nPairs; p++) {
-			order[p] = (int) (keyed[p] & ((1 << 24) - 1));
-		}
-
-		int rowBytes = 3 * 4 * (maxLength + 1);
-		int batch = (int) Math.min(nPairs, Math.max(SwKernels.GROUP_SIZE, BUFFER_BUDGET / rowBytes));
-		batch = (batch + SwKernels.GROUP_SIZE - 1) / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE;
-
-		synchronized (DEVICE_LOCK) {
-			runBatches(residues, seqStart, subs, k, gapPenalty, local, batch, maxLength, order, pairQuery, pairTarget,
-					result);
-		}
-		return result;
-	}
-
-	/** Serialises the alignment executions on the device. */
-	private static final Object DEVICE_LOCK = new Object();
-
-	private static void runBatches(int[] residues, int[] seqStart, int[] subs, int k, GapPenalty gapPenalty,
-			boolean local, int batch, int maxLength, int[] order, int[] pairQuery, int[] pairTarget, int[] result) {
-		int nPairs = result.length;
-		Batcher batcher = new Batcher(residues, seqStart, subs, k, gapPenalty.getOpenPenalty(),
-				gapPenalty.getExtensionPenalty(), local, batch, maxLength);
-		try {
-			for (int from = 0; from < nPairs; from += batch) {
-				int size = Math.min(batch, nPairs - from);
-				int[] scores = batcher.run(order, pairQuery, pairTarget, from, size);
-				for (int p = 0; p < size; p++) {
-					result[order[from + p]] = scores[p];
+		private void build(int minResidues, int minSeqs, int minSubs, int minLength) {
+			if (plan != null) {
+				try {
+					plan.close();
+				} catch (Exception e) {
+					logger.warn("Could not release the previous alignment execution plan", e);
 				}
 			}
-		} finally {
-			batcher.close();
-		}
-	}
+			residueCapacity = Math.max(residueCapacity, pow2(Math.max(minResidues, 1 << 16)));
+			seqCapacity = Math.max(seqCapacity, pow2(Math.max(minSeqs, 1 << 12)));
+			subsCapacity = Math.max(subsCapacity, pow2(Math.max(minSubs, 1024)));
+			lengthCapacity = Math.max(lengthCapacity, pow2(Math.max(minLength, 1024)));
+			batch = (int) Math.max(SwKernels.GROUP_SIZE, BUFFER_BUDGET / (3L * 4 * lengthCapacity));
+			batch = batch / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE;
 
-	/** One execution plan, re-executed for every batch of pairs. */
-	private static final class Batcher implements AutoCloseable {
-		private final int batch;
-		private final IntArray pairQuery;
-		private final IntArray pairTarget;
-		private final IntArray params;
-		private final IntArray scores;
-		private final WorkerGrid worker;
-		private final GridScheduler gridScheduler;
-		private final TornadoExecutionPlan plan;
-
-		Batcher(int[] residues, int[] seqStart, int[] subs, int alphabet, int gop, int gep, boolean local,
-				int batch, int maxLength) {
-			this.batch = batch;
-			IntArray residueArray = IntArray.fromArray(residues);
-			IntArray seqStartArray = IntArray.fromArray(seqStart);
-			IntArray subsArray = IntArray.fromArray(subs);
+			residues = new IntArray(residueCapacity);
+			seqStart = new IntArray(seqCapacity);
+			subs = new IntArray(subsCapacity);
 			pairQuery = new IntArray(batch);
 			pairTarget = new IntArray(batch);
-			params = IntArray.fromElements(alphabet, gop, gep, local ? 1 : 0, 0, batch);
+			params = new IntArray(6);
 			scores = new IntArray(batch);
-			long bufferSize = (long) (maxLength + 1) * batch;
-			IntArray bufM = new IntArray((int) bufferSize);
-			IntArray bufS0 = new IntArray((int) bufferSize);
-			IntArray bufS1 = new IntArray((int) bufferSize);
+			IntArray bufM = new IntArray(lengthCapacity * batch);
+			IntArray bufS0 = new IntArray(lengthCapacity * batch);
+			IntArray bufS1 = new IntArray(lengthCapacity * batch);
 			KernelContext ctx = new KernelContext();
 
 			TaskGraph taskGraph = new TaskGraph("sw")
-					.transferToDevice(DataTransferMode.FIRST_EXECUTION, residueArray, seqStartArray, subsArray)
-					.transferToDevice(DataTransferMode.EVERY_EXECUTION, pairQuery, pairTarget, params)
-					.task("scores", SwKernels::alignmentScores, ctx, residueArray, seqStartArray, pairQuery,
-							pairTarget, subsArray, params, bufM, bufS0, bufS1, scores)
+					.transferToDevice(DataTransferMode.EVERY_EXECUTION, residues, seqStart, subs, pairQuery,
+							pairTarget, params)
+					.task("scores", SwKernels::alignmentScores, ctx, residues, seqStart, pairQuery, pairTarget, subs,
+							params, bufM, bufS0, bufS1, scores)
 					.transferToHost(DataTransferMode.EVERY_EXECUTION, scores);
 			worker = new WorkerGrid1D(batch);
 			worker.setLocalWork(SwKernels.GROUP_SIZE, 1, 1);
 			gridScheduler = new GridScheduler("sw.scores", worker);
 			plan = new TornadoExecutionPlan(taskGraph.snapshot());
 		}
+	}
 
-		int[] run(int[] order, int[] allQuery, int[] allTarget, int from, int size) {
-			for (int p = 0; p < size; p++) {
-				int pair = order[from + p];
-				pairQuery.set(p, allQuery[pair]);
-				pairTarget.set(p, allTarget[pair]);
-			}
-			params.set(SwKernels.P_PAIRS, size);
-			worker.setGlobalWork((size + SwKernels.GROUP_SIZE - 1) / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE,
-					1, 1);
-			long t0 = System.nanoTime();
-			plan.withGridScheduler(gridScheduler).execute();
-			if (Boolean.getBoolean("biojava.tornado.trace")) {
-				logger.info("sw: batch of {} pairs in {} ms", size, (System.nanoTime() - t0) / 1e6);
-			}
-			int[] out = new int[size];
-			for (int p = 0; p < size; p++) {
-				out[p] = scores.get(p);
-			}
-			return out;
-		}
+	private static int roundUp(int n) {
+		return (n + SwKernels.GROUP_SIZE - 1) / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE;
+	}
 
-		@Override
-		public void close() {
-			try {
-				plan.close();
-			} catch (Exception e) {
-				logger.warn("Could not release the alignment execution plan", e);
-			}
-		}
+	private static int pow2(int n) {
+		return n <= 1 ? 1 : Integer.highestOneBit(n - 1) << 1;
 	}
 }

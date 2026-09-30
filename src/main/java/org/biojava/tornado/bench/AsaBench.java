@@ -40,7 +40,7 @@ public class AsaBench {
 			double[] leanAsas = null;
 			for (int r = 0; r < reps + 1; r++) {
 				long t = System.nanoTime();
-				leanAsas = AsaLeanCpu.calculate(pts, radii, AsaCalculator.DEFAULT_PROBE_SIZE, AsaCalculator.DEFAULT_N_SPHERE_POINTS);
+				leanAsas = org.biojava.tornado.asa.CpuAsa.calculate(pts, radii, AsaCalculator.DEFAULT_PROBE_SIZE, AsaCalculator.DEFAULT_N_SPHERE_POINTS, true);
 				if (r > 0) lean = Math.min(lean, (System.nanoTime() - t) / 1e6);
 			}
 			if (!java.util.Arrays.equals(ref, leanAsas)) System.out.println("  lean CPU differs from BioJava: " + parity(ref, leanAsas));
