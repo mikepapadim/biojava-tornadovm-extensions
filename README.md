@@ -9,22 +9,38 @@ results** as the BioJava code they replace:
 | `org.biojava.nbio.structure.asa.AsaCalculator` | `org.biojava.tornado.asa.TornadoAsaCalculator` | bit-identical per-atom and per-residue ASA |
 | `org.biojava.nbio.alignment.Alignments.getAllPairsScores` / `getAllPairsScorers` (`GLOBAL`, `LOCAL`) | `org.biojava.tornado.align.TornadoAlignments` | identical scores, identical `GuideTree` |
 
-On an RTX 4090 against a 32-thread i9-13900K (details and methodology in [FINDINGS.md](FINDINGS.md)):
+## Results at a glance
 
-| Workload | vs BioJava today | vs the same algorithm in lean Java on all 32 cores |
-|---|---|---|
-| ASA, 59k to 2.4M atoms | **11-17x** | 2.3-3.4x |
-| All-pairs alignment scores, 20k to 2M pairs | **570-700x** (measured up to 40k pairs) | **15-56x** |
-| Small inputs (< ~1k pairs) | the library runs its lean CPU code: 4-6x (ASA), ~25x (alignment) faster than BioJava | - |
+RTX 4090 vs a 32-thread i9-13900K, end-to-end (host↔device transfers included). All results are identical to
+BioJava's. "Lean Java" is the same algorithm as the GPU kernel in plain Java on all cores; it is also this
+library's CPU fallback. Full tables and methodology are in [FINDINGS.md](FINDINGS.md).
 
-Against the reference C libraries on the same inputs (same scores): the GPU is 3-7x faster than
-[parasail](https://github.com/jeffdaily/parasail) (32 threads) for global alignment but only 0.7-2x for local
-alignment, and 8-14x faster than [FreeSASA](https://freesasa.github.io/) for ASA. See FINDINGS.md,
-reproducible with `scripts/external/compare.sh`.
+**All-pairs alignment scores** (BLOSUM62, gaps 10/1)
 
-BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a
-TornadoVM runtime, or for small inputs, the classes run the same algorithms in lean Java on all cores. That
-is also exact, and already several times faster than BioJava, so the same code runs everywhere.
+| Workload | BioJava (32 thr) | Lean Java (32 thr) | [parasail](https://github.com/jeffdaily/parasail), C SIMD (32 thr) | GPU |
+|---|---:|---:|---:|---:|
+| Global, 200 proteins, 20k pairs | 9.72 s | 381 ms | 52 ms | **17 ms** |
+| Global, Pfam PF00104, 40k pairs | 6.04 s | 246 ms | 62 ms | **9 ms** |
+| Global, 2,000 proteins, 2M pairs | ~11 min (est.) | 34.1 s | 4.0 s | **0.60 s** |
+| Local, 2,000 proteins, 2M pairs | ~11 min (est.) | 24.0 s | 0.65 s | **0.60 s** |
+
+**Accessible surface area** (Shrake-Rupley, 1000 points)
+
+| Workload | BioJava (32 thr) | Lean Java (32 thr) | [FreeSASA](https://freesasa.github.io/), C (16 thr, its max) | GPU |
+|---|---:|---:|---:|---:|
+| 4V6X, 238k atoms | 519 ms | 109 ms | 561 ms | **39 ms** |
+| 3J3Q, 2.4M atoms | 6.8 s | 1.13 s | 5.29 s | **0.37 s** |
+
+The short version:
+* The GPU is far ahead of BioJava today, and 3-7x ahead of parasail for global alignment.
+* For local alignment the GPU only matches parasail.
+* Without any GPU, the lean Java path alone is 4-6x (ASA) and ~25x (alignment) faster than BioJava.
+
+**Tested devices:** RTX 4090 with the CUDA and OpenCL backends, and an Intel UHD 770 iGPU with OpenCL (no
+FP64, so ASA uses the exact single-precision path). All tests give exact results on all three.
+
+BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a TornadoVM
+runtime, or for small inputs, the classes run the lean Java path, which is also exact.
 
 ---
 
@@ -151,3 +167,13 @@ scripts/run.sh <main> args  # run any class under TornadoVM
 
 Hot spots investigated and not included are in [FINDINGS.md](FINDINGS.md) (CE structure alignment, and the
 CUDA library bindings).
+
+## Status and limitations
+
+* A prototype proposed upstream in [biojava/biojava#1158](https://github.com/biojava/biojava/issues/1158).
+  It is not on Maven Central.
+* The alignment path covers score types `GLOBAL` and `LOCAL`, with affine, constant and linear gaps.
+  `*_IDENTITIES` and `*_SIMILARITIES` (the MSA default) need a traceback and still run in BioJava.
+* Local alignment on the GPU only matches parasail. Packed 8/16-bit arithmetic on the GPU would be the next step.
+* CE structure alignment is not accelerated: its hot spot is `CECalculator.dpAlign`, see FINDINGS.md.
+* Measured on one machine only (RTX 4090, Intel UHD 770). AMD and Apple GPUs have not been tested yet.
