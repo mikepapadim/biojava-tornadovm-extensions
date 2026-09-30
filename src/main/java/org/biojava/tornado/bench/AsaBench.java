@@ -60,7 +60,7 @@ public class AsaBench {
 				got = calc.calculateAsasGpu();
 				double ms = (System.nanoTime() - t) / 1e6;
 				if (r == 0) {
-					System.out.printf("  [%s cold GPU run incl. JIT: %.1f ms]%n", id, ms);
+					System.out.printf("  [%s cold GPU run incl. JIT: %.1f ms, atoms re-checked on CPU: %d]%n", id, ms, calc.getLastRecomputedAtoms());
 				} else if (ms < gpu) {
 					gpu = ms;
 					nb = calc.getLastHostNanos() / 1e6;

@@ -24,6 +24,22 @@ class TornadoAsaCalculatorTest {
 		assertArrayEquals(expected, actual, 0.0);
 	}
 
+	/** The single-precision kernel (devices without FP64) with its exact re-checks gives the same result. */
+	@ParameterizedTest
+	@ValueSource(strings = { "1SMT", "4HHB", "1CDG" })
+	void singlePrecisionPathIsBitIdentical(String id) throws Exception {
+		Atom[] atoms = StructureTools.getAllNonHAtomArray(TestStructures.load(id), false, 0);
+		double[] expected = new AsaCalculator(atoms, AsaCalculator.DEFAULT_PROBE_SIZE, 1000, 1).calculateAsas();
+		System.setProperty("biojava.tornado.asa.precision", "fp32");
+		try {
+			double[] actual = TestStructures.forced(
+					() -> new TornadoAsaCalculator(atoms, AsaCalculator.DEFAULT_PROBE_SIZE, 1000, 1).calculateAsas());
+			assertArrayEquals(expected, actual, 0.0);
+		} finally {
+			System.clearProperty("biojava.tornado.asa.precision");
+		}
+	}
+
 	@ParameterizedTest
 	@ValueSource(ints = { 30, 100, 960 })
 	void otherSpherePointCounts(int nPoints) throws Exception {

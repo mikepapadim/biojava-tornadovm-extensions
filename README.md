@@ -103,6 +103,9 @@ Started with plain `java` (no argument file), the same program runs on the lean 
 | delegated to BioJava | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER` |
 
 * `-Dbiojava.tornado=off` forces the CPU path, and `-Dbiojava.tornado=force` ignores the thresholds.
+* GPUs without FP64 (e.g. Intel iGPUs) are detected: ASA then uses a single-precision kernel whose
+  near-boundary cases are recomputed exactly on the CPU, so results stay identical.
+* Tested on an RTX 4090 (CUDA and OpenCL backends) and an Intel UHD 770 (OpenCL); all tests are exact on all three.
 * If a kernel fails (no device, out of memory, driver error), a warning is logged, the GPU path is
   disabled for the rest of the run, and the call is answered by the CPU path.
 * The first GPU call in a JVM compiles the kernel (about 0.5 s). Later calls re-execute a cached execution

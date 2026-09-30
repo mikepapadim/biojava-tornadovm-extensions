@@ -24,6 +24,15 @@ public final class CpuAsa {
 	 * @return the ASA of every atom
 	 */
 	public static double[] calculate(Point3d[] pts, double[] radii, double probe, int nPoints, boolean parallel) {
+		return calculate(pts, radii, probe, nPoints, parallel, null);
+	}
+
+	/**
+	 * As {@link #calculate(Point3d[], double[], double, int, boolean)}, for the given atoms only (all atoms if
+	 * null); the other entries of the result are 0.
+	 */
+	public static double[] calculate(Point3d[] pts, double[] radii, double probe, int nPoints, boolean parallel,
+			int[] only) {
 		int n = pts.length;
 		if (n == 0) {
 			return new double[0];
@@ -53,7 +62,7 @@ public final class CpuAsa {
 		final int fnx = nx, fny = ny, fnz = nz;
 		double cons = 4.0 * Math.PI / nPoints;
 		double[] asas = new double[n];
-		IntStream atoms = IntStream.range(0, n);
+		IntStream atoms = only == null ? IntStream.range(0, n) : IntStream.of(only);
 		(parallel ? atoms.parallel() : atoms).forEach(i -> {
 			double xi = c[3 * i], yi = c[3 * i + 1], zi = c[3 * i + 2];
 			double ri = probe + radii[i];

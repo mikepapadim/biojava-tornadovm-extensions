@@ -125,14 +125,27 @@ The same code and the same 20 parity tests, on the other TornadoVM backends avai
 
 | Device (backend) | Parity tests | Alignment, 20k pairs (1.84 G cells) | Alignment, 500k pairs (61.8 G cells) | ASA |
 |---|---|---|---|---|
-| RTX 4090 (CUDA/PTX) | 20/20 exact | 17.2 ms, 107 GCUPS | 260 ms, 238 GCUPS | as above |
-| RTX 4090 (OpenCL) | 20/20 exact | 15.0 ms, 122 GCUPS | 230 ms, 269 GCUPS (65x lean CPU) | runs, exact |
-| Intel UHD 770 iGPU (OpenCL) | 20/20 exact | 3.28 s, 0.6 GCUPS | not run | no FP64: falls back to the CPU path |
+| RTX 4090 (CUDA/PTX) | all exact | 17.2 ms, 107 GCUPS | 260 ms, 238 GCUPS | as above |
+| RTX 4090 (OpenCL) | all exact | 15.0 ms, 122 GCUPS | 230 ms, 269 GCUPS (65x lean CPU) | runs, exact |
+| Intel UHD 770 iGPU (OpenCL) | all exact | 3.28 s, 0.6 GCUPS | not run | no FP64: FP32 kernel + exact re-checks, 4V6X 428 ms |
 
 * On the 4090, OpenCL is 10-15% faster than CUDA/PTX for this integer kernel.
-* The Intel iGPU gives exact scores but is 5-10x slower than the 32-core CPU: not worth using. It lacks FP64,
-  so the ASA kernel is refused at compile time (`TornadoDeviceFP64NotSupported`); the library then runs ASA on
-  the CPU path, and keeps the alignment kernel on the iGPU (the fallback is per operation).
+* The Intel iGPU gives exact results but is slower than the 32-core CPU (alignment 5-10x, ASA ~4x slower
+  than lean Java; its ASA still beats stock BioJava on 32 threads, 428 vs 510 ms on 4V6X). Not worth using on
+  this machine, but it shows the code runs unchanged on another vendor's GPU.
+
+### ASA on devices without FP64
+
+Many GPUs (Intel iGPUs, Apple, consumer AMD with FP64 disabled) have no double precision. For them
+(`TornadoDeviceFP64NotSupported` is detected automatically, or `-Dbiojava.tornado.asa.precision=fp32`) the
+library uses a single-precision kernel that stays exact:
+* coordinates are sent relative to each atom's grid cell (computed in double on the host, at most ~7 A), so
+  the single-precision error of an occlusion test is below ~2e-5 A;
+* a test within 1e-4 A (5x that bound) of the occlusion boundary marks the atom as ambiguous, and the host
+  recomputes those atoms exactly in double precision (~15% of atoms);
+* result: bit-identical to BioJava on every structure tested (1SMT, 4HHB, 1CDG, 1AON, 4V6X, 3J3Q), and on
+  the RTX 4090 as fast as the FP64 kernel (3J3Q 374 vs 372 ms). A first version that centred coordinates on
+  the structure needed a 1e-2 margin and re-checked ~80-100% of atoms (slower than the CPU).
 
 ## Investigated and not included
 
@@ -149,6 +162,5 @@ Not attempted.
 
 ## Not yet done
 * Identity/similarity scorer types (`*_IDENTITIES`, the MSA default) need a traceback on the GPU.
-* AMD and Apple GPUs are not measured yet. FP64-less devices would need an FP32 ASA kernel with an exact
-  re-check of the boundary cases.
+* AMD and Apple GPUs are not measured yet (the FP32 ASA path is meant for them).
 * JMH harness: the benchmarks are simple best-of-N timers.

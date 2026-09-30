@@ -28,6 +28,7 @@ import uk.ac.manchester.tornado.api.WorkerGrid;
 import uk.ac.manchester.tornado.api.WorkerGrid1D;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.DoubleArray;
+import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 /**
@@ -56,6 +57,7 @@ public class TornadoAsaCalculator {
 	private int minGpuAtoms = DEFAULT_MIN_GPU_ATOMS;
 
 	private long lastHostNanos;
+	private int lastRecomputedAtoms;
 	private long lastGpuNanos;
 
 	/** @see AsaCalculator#AsaCalculator(Structure, double, int, int, boolean, int) */
@@ -105,6 +107,11 @@ public class TornadoAsaCalculator {
 	/** Sets the minimum number of atoms for which the GPU is used. */
 	public void setMinGpuAtoms(int minGpuAtoms) {
 		this.minGpuAtoms = minGpuAtoms;
+	}
+
+	/** @return number of atoms the last single-precision GPU run left to the exact CPU path */
+	public int getLastRecomputedAtoms() {
+		return lastRecomputedAtoms;
 	}
 
 	/** @return host time of the last GPU run spent bucketing atoms into grid cells, in ns */
@@ -165,11 +172,15 @@ public class TornadoAsaCalculator {
 		long t1 = System.nanoTime();
 
 		IntArray counts = runKernel(cells);
+		int ambiguous = 0;
 		for (int i = 0; i < n; i++) {
-			if (counts.get(i) < 0) {
+			if (counts.get(i) == -1) {
 				logger.info("Atom {} has more than {} neighbours, using the CPU implementation", i,
 						AsaKernels.LOCAL_CAPACITY);
 				return calculateAsasCpu();
+			}
+			if (counts.get(i) == -2) {
+				ambiguous++;
 			}
 		}
 		long t2 = System.nanoTime();
@@ -178,17 +189,61 @@ public class TornadoAsaCalculator {
 			double radius = probe + radii[i];
 			asas[i] = cons * counts.get(i) * radius * radius;
 		}
+		if (ambiguous > 0) {
+			// single-precision kernel: redo the atoms with a sphere point near an occlusion boundary exactly
+			int[] redo = new int[ambiguous];
+			for (int i = 0, k = 0; i < n; i++) {
+				if (counts.get(i) == -2) {
+					redo[k++] = i;
+				}
+			}
+			double[] exact = CpuAsa.calculate(atomCoords, radii, probe, nSpherePoints, nThreads > 1, redo);
+			for (int i : redo) {
+				asas[i] = exact[i];
+			}
+			lastRecomputedAtoms = ambiguous;
+		} else {
+			lastRecomputedAtoms = 0;
+		}
 		lastHostNanos = t1 - t0;
 		lastGpuNanos = t2 - t1;
 		return asas;
 	}
 
 	private IntArray runKernel(CellGrid cells) {
+		boolean fp32 = useFp32();
 		Engine engine;
 		synchronized (ENGINES) {
-			engine = ENGINES.computeIfAbsent(nSpherePoints, Engine::new);
+			engine = ENGINES.computeIfAbsent(fp32 ? -nSpherePoints : nSpherePoints, key -> new Engine(nSpherePoints, fp32));
 		}
-		return engine.run(atomCoords, radii, probe, cells);
+		try {
+			return engine.run(atomCoords, radii, probe, cells);
+		} catch (RuntimeException e) {
+			if (!fp32 && isFp64Unsupported(e)) {
+				logger.info("The device has no FP64: using the single-precision ASA kernel with exact CPU re-checks");
+				fp64Unsupported = true;
+				return runKernel(cells);
+			}
+			throw e;
+		}
+	}
+
+	/** Set once a device without FP64 has been seen. */
+	private static volatile boolean fp64Unsupported;
+
+	/** {@code biojava.tornado.asa.precision}: auto (default: FP64, FP32 if the device has no FP64), fp32 or fp64. */
+	private static boolean useFp32() {
+		String precision = System.getProperty("biojava.tornado.asa.precision", "auto");
+		return "fp32".equalsIgnoreCase(precision) || ("auto".equalsIgnoreCase(precision) && fp64Unsupported);
+	}
+
+	private static boolean isFp64Unsupported(Throwable e) {
+		for (Throwable t = e; t != null; t = t.getCause()) {
+			if (t.getClass().getSimpleName().contains("FP64")) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** One persistent execution plan per number of sphere points, shared by all calculators. */
@@ -201,7 +256,13 @@ public class TornadoAsaCalculator {
 	 */
 	private static final class Engine {
 		private final int nPoints;
+		private final boolean fp32;
 		private final DoubleArray spherePoints;
+		private final FloatArray spherePointsF;
+		private FloatArray coordsF;
+		private FloatArray radiiF;
+		private FloatArray gridF;
+		private IntArray atomCell;
 		private int atomCapacity;
 		private int cellCapacity;
 		private DoubleArray coords;
@@ -215,9 +276,16 @@ public class TornadoAsaCalculator {
 		private GridScheduler gridScheduler;
 		private TornadoExecutionPlan plan;
 
-		Engine(int nPoints) {
+		Engine(int nPoints, boolean fp32) {
 			this.nPoints = nPoints;
-			this.spherePoints = DoubleArray.fromArray(generateSpherePoints(nPoints));
+			this.fp32 = fp32;
+			double[] points = generateSpherePoints(nPoints);
+			this.spherePoints = DoubleArray.fromArray(points);
+			float[] pointsF = new float[points.length];
+			for (int k = 0; k < points.length; k++) {
+				pointsF[k] = (float) points[k];
+			}
+			this.spherePointsF = FloatArray.fromArray(pointsF);
 		}
 
 		synchronized IntArray run(Point3d[] atomCoords, double[] atomRadii, double probe, CellGrid cells) {
@@ -226,21 +294,45 @@ public class TornadoAsaCalculator {
 			if (plan == null || n > atomCapacity || nCells + 1 > cellCapacity) {
 				build(Math.max(n, atomCapacity), Math.max(nCells + 1, cellCapacity));
 			}
+			if (fp32) {
+				// coordinates relative to the atom's grid cell, computed in double: single precision then keeps
+				// ~5e-7 A of accuracy whatever the size of the structure
+				for (int i = 0; i < n; i++) {
+					int cx = cells.atomCell[3 * i];
+					int cy = cells.atomCell[3 * i + 1];
+					int cz = cells.atomCell[3 * i + 2];
+					coordsF.set(3 * i, (float) (atomCoords[i].x - (cells.minX + cx * cells.cellSize)));
+					coordsF.set(3 * i + 1, (float) (atomCoords[i].y - (cells.minY + cy * cells.cellSize)));
+					coordsF.set(3 * i + 2, (float) (atomCoords[i].z - (cells.minZ + cz * cells.cellSize)));
+					radiiF.set(i, (float) atomRadii[i]);
+					atomCell.set(3 * i, cx);
+					atomCell.set(3 * i + 1, cy);
+					atomCell.set(3 * i + 2, cz);
+				}
+				gridF.set(0, 0f);
+				gridF.set(1, 0f);
+				gridF.set(2, 0f);
+				gridF.set(3, (float) cells.cellSize);
+				gridF.set(4, (float) probe);
+			} else {
+				for (int i = 0; i < n; i++) {
+					coords.set(3 * i, atomCoords[i].x);
+					coords.set(3 * i + 1, atomCoords[i].y);
+					coords.set(3 * i + 2, atomCoords[i].z);
+					radii.set(i, atomRadii[i]);
+				}
+				grid.set(0, cells.minX);
+				grid.set(1, cells.minY);
+				grid.set(2, cells.minZ);
+				grid.set(3, cells.cellSize);
+				grid.set(4, probe);
+			}
 			for (int i = 0; i < n; i++) {
-				coords.set(3 * i, atomCoords[i].x);
-				coords.set(3 * i + 1, atomCoords[i].y);
-				coords.set(3 * i + 2, atomCoords[i].z);
-				radii.set(i, atomRadii[i]);
 				cellAtoms.set(i, cells.cellAtoms[i]);
 			}
 			for (int c = 0; c <= nCells; c++) {
 				cellStart.set(c, cells.cellStart[c]);
 			}
-			grid.set(0, cells.minX);
-			grid.set(1, cells.minY);
-			grid.set(2, cells.minZ);
-			grid.set(3, cells.cellSize);
-			grid.set(4, probe);
 			dims.set(0, n);
 			dims.set(1, cells.nx);
 			dims.set(2, cells.ny);
@@ -270,21 +362,37 @@ public class TornadoAsaCalculator {
 			}
 			atomCapacity = Math.max(1 << 14, Integer.highestOneBit(minAtoms - 1) << 1);
 			cellCapacity = Math.max(1 << 16, Integer.highestOneBit(minCells - 1) << 1);
-			coords = new DoubleArray(3 * atomCapacity);
-			radii = new DoubleArray(atomCapacity);
 			cellAtoms = new IntArray(atomCapacity);
 			cellStart = new IntArray(cellCapacity);
-			grid = new DoubleArray(5);
 			dims = new IntArray(4);
 			counts = new IntArray(atomCapacity);
 			KernelContext ctx = new KernelContext();
 
-			TaskGraph taskGraph = new TaskGraph("asa")
-					.transferToDevice(DataTransferMode.FIRST_EXECUTION, spherePoints)
-					.transferToDevice(DataTransferMode.EVERY_EXECUTION, coords, radii, cellStart, cellAtoms, grid, dims)
-					.task("fused", AsaKernels::fusedAsa, ctx, coords, radii, cellStart, cellAtoms, grid, dims,
-							spherePoints, counts, nPoints)
-					.transferToHost(DataTransferMode.EVERY_EXECUTION, counts);
+			TaskGraph taskGraph;
+			if (fp32) {
+				coordsF = new FloatArray(3 * atomCapacity);
+				radiiF = new FloatArray(atomCapacity);
+				atomCell = new IntArray(3 * atomCapacity);
+				gridF = new FloatArray(5);
+				taskGraph = new TaskGraph("asa")
+						.transferToDevice(DataTransferMode.FIRST_EXECUTION, spherePointsF)
+						.transferToDevice(DataTransferMode.EVERY_EXECUTION, coordsF, radiiF, cellStart, cellAtoms,
+								atomCell, gridF, dims)
+						.task("fused", AsaKernels::fusedAsaFp32, ctx, coordsF, radiiF, cellStart, cellAtoms,
+								atomCell, gridF, dims, spherePointsF, counts, nPoints)
+						.transferToHost(DataTransferMode.EVERY_EXECUTION, counts);
+			} else {
+				coords = new DoubleArray(3 * atomCapacity);
+				radii = new DoubleArray(atomCapacity);
+				grid = new DoubleArray(5);
+				taskGraph = new TaskGraph("asa")
+						.transferToDevice(DataTransferMode.FIRST_EXECUTION, spherePoints)
+						.transferToDevice(DataTransferMode.EVERY_EXECUTION, coords, radii, cellStart, cellAtoms, grid,
+								dims)
+						.task("fused", AsaKernels::fusedAsa, ctx, coords, radii, cellStart, cellAtoms, grid, dims,
+								spherePoints, counts, nPoints)
+						.transferToHost(DataTransferMode.EVERY_EXECUTION, counts);
+			}
 			worker = new WorkerGrid1D(AsaKernels.GROUP_SIZE);
 			worker.setLocalWork(AsaKernels.GROUP_SIZE, 1, 1);
 			gridScheduler = new GridScheduler("asa.fused", worker);
@@ -301,6 +409,7 @@ public class TornadoAsaCalculator {
 		final int nx, ny, nz;
 		final int[] cellStart;
 		final int[] cellAtoms;
+		final int[] atomCell;
 
 		CellGrid() {
 			int n = atomCoords.length;
@@ -332,11 +441,15 @@ public class TornadoAsaCalculator {
 			int nCells = nx * ny * nz;
 			int[] cellOf = new int[n];
 			int[] start = new int[nCells + 1];
+			atomCell = new int[3 * n];
 			for (int i = 0; i < n; i++) {
 				Point3d p = atomCoords[i];
 				int cx = (int) ((p.x - minX) / cellSize);
 				int cy = (int) ((p.y - minY) / cellSize);
 				int cz = (int) ((p.z - minZ) / cellSize);
+				atomCell[3 * i] = cx;
+				atomCell[3 * i + 1] = cy;
+				atomCell[3 * i + 2] = cz;
 				cellOf[i] = (cx * ny + cy) * nz + cz;
 				start[cellOf[i] + 1]++;
 			}
