@@ -10,7 +10,7 @@
   <packaging>jar</packaging>
 
   <name>biojava-tornadovm-extensions</name>
-  <description>GPU acceleration of BioJava hot loops (ASA, CE, all-pairs alignment scores) via TornadoVM</description>
+  <description>GPU acceleration of BioJava hot loops (ASA, all-pairs alignment scores) via TornadoVM</description>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

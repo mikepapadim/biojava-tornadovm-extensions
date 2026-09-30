@@ -42,7 +42,7 @@ The 16 JUnit parity tests pass under TornadoVM (`scripts/test-gpu.sh`) and on a 
 ## All-pairs alignment scores (Needleman-Wunsch `GLOBAL`, Smith-Waterman `LOCAL`)
 
 `bench/SwBench`, BLOSUM62, gap open 10 / extend 1 (BioJava defaults). Random protein sets use a fixed seed and
-a uniform length range; Pfam PF00104 is 283 ungapped family members (median about 190 aa).
+a uniform length range; Pfam PF00104 is 283 ungapped family members (about 160 aa on average: 1.02 G cells over 39,903 pairs).
 
 | Set | Pairs | DP cells | Type | BioJava (32 thr) | Lean CPU 32 | GPU | vs BioJava | vs lean CPU | GPU GCUPS |
 |---|---:|---:|---|---:|---:|---:|---:|---:|---:|
@@ -74,8 +74,8 @@ a uniform length range; Pfam PF00104 is 283 ungapped family members (median abou
 
 ## Investigated and not included
 
-**CE structure alignment (jCE).** `CECalculator.initSumOfDistances` was ported and gave identical
-alignments, but it is only about 0-2% of CE's runtime, so the end-to-end speedup was 0.98-1.01x (1CDG/1CGT,
+**CE structure alignment (jCE).** `CECalculator.initSumOfDistances` was ported; it gave the same
+alignments and scores (the distance matrix differed in the last bits, likely FMA contraction), but it is only about 0-2% of CE's runtime, so the end-to-end speedup was 0.98-1.01x (1CDG/1CGT,
 1TIM/1CDG, 5A22/6U1X). A JFR profile of `CeMain` (1CDG.A vs 1CGT.A) puts about 71% of samples in
 `CECalculator.dpAlign` and about 26% in `getScoreFromDistanceMatrices`: those are the real targets.
 
