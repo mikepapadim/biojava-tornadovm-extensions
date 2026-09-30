@@ -76,6 +76,48 @@ a uniform length range; Pfam PF00104 is 283 ungapped family members (about 160 a
 * Guide trees built from the GPU scorers are identical (Newick string) to BioJava's (test on 60 Pfam
   sequences).
 
+## External baselines (C libraries, same inputs)
+
+`scripts/external/compare.sh` builds the libraries and runs them on exactly the inputs of our benchmarks.
+
+**parasail** (SIMD striped NW/SW with 8/16/32-bit saturation-checked profiles, OpenMP, 32 threads, `-O3
+-march=native`). BioJava's gaps (open 10, extend 1: a gap of k costs 10 + k) are parasail's open 11, extend 1.
+**All scores are identical** across BioJava, our GPU kernel and parasail.
+
+| Set | Type | parasail 32 thr | Lean Java 32 thr | GPU (CUDA) | GPU vs parasail |
+|---|---|---:|---:|---:|---:|
+| 200 seqs, 19,900 pairs | NW | 52.0 ms | 381 ms | 17.1 ms | 3.0x |
+| 200 seqs, 19,900 pairs | SW | 11.5 ms | 257 ms | 16.9 ms | 0.7x |
+| Pfam PF00104, 39,903 pairs | NW | 61.9 ms | 246 ms | 8.6 ms | 7.2x |
+| Pfam PF00104, 39,903 pairs | SW | 18.8 ms | 199 ms | 8.9 ms | 2.1x |
+| 1000 seqs, 499,500 pairs | NW | 1580 ms | 12.7 s | 259 ms | 6.1x |
+| 1000 seqs, 499,500 pairs | SW | 261 ms | 9.1 s | 259 ms | 1.0x |
+| 2000 seqs, 1,999,000 pairs | NW | 3996 ms | 34.1 s | 598 ms | 6.7x |
+| 2000 seqs, 1,999,000 pairs | SW | 647 ms | 24.0 s | 599 ms | 1.1x |
+
+* Against a state-of-the-art SIMD CPU library the GPU kernel is **3-7x faster for global alignment** and only
+  **0.7-2x for local alignment**. parasail's local alignment of unrelated sequences stays in 8-bit lanes (32
+  per AVX2 vector), which our 32-bit-per-cell kernel does not match.
+* Our kernel is at ~230-280 GCUPS. Packed 8/16-bit arithmetic on the GPU (as CUDASW++ does) is the known
+  route to more; not attempted. Kernel variants tried: strip heights 8/16/32 (32 best); a fully unrolled strip
+  with the row state in registers instead of local memory was 10-20% slower; batches sized to 4 GB of
+  row buffers (more resident threads) gave +10%. The profiler shows the kernel is ~85% of the time.
+
+**FreeSASA** (C, Shrake-Rupley, 1000 points, probe 1.4, called through its C API with BioJava's atoms and
+radii; its S&R supports at most 16 threads). Totals agree with BioJava's within 0.05% (FreeSASA uses its own
+sphere points).
+
+| PDB | Atoms | FreeSASA 16 thr | Lean Java 16 thr | Lean Java 32 thr | GPU | GPU vs FreeSASA |
+|---|---:|---:|---:|---:|---:|---:|
+| 1SMT | 1,574 | 7.0 ms | - | 1.7 ms | 0.8 ms | 8.8x |
+| 4HHB | 4,384 | 13.3 ms | - | 2.8 ms | 1.7 ms | 7.8x |
+| 1AON | 58,674 | 144 ms | 39.7 ms | 28.7 ms | 12.3 ms | 11.7x |
+| 4V6X | 237,685 | 561 ms | 175 ms | 109 ms | 39.2 ms | 14.3x |
+| 3J3Q | 2,440,800 | 5.29 s | 1.64 s | 1.13 s | 372 ms | 14.2x |
+
+* At equal thread counts the lean Java ASA is ~3.2x faster than FreeSASA (neighbours sorted by distance, so
+  the occlusion test usually stops at the first neighbour).
+
 ## Backends and devices
 
 The same code and the same 20 parity tests, on the other TornadoVM backends available on this machine (OpenCL SDK

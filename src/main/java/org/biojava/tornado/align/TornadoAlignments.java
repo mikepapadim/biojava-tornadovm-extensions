@@ -45,7 +45,7 @@ public final class TornadoAlignments {
 	public static final long DEFAULT_MIN_GPU_CELLS = 10_000_000L;
 
 	/** Device memory budget for the DP row buffers of one batch, in bytes. */
-	static final long BUFFER_BUDGET = 1L << 30;
+	static final long BUFFER_BUDGET = Long.getLong("biojava.tornado.sw.bufferBytes", 4L << 30);
 
 	/** The shared GPU engines (affine and linear gaps); executions are serialised on the device. */
 	private static final Engine AFFINE = new Engine(false);
@@ -343,7 +343,7 @@ public final class TornadoAlignments {
 			residueCapacity = Math.max(residueCapacity, pow2(Math.max(minResidues, 1 << 16)));
 			seqCapacity = Math.max(seqCapacity, pow2(Math.max(minSeqs, 1 << 12)));
 			subsCapacity = Math.max(subsCapacity, pow2(Math.max(minSubs, 1024)));
-			lengthCapacity = Math.max(lengthCapacity, pow2(Math.max(minLength, 1024)));
+			lengthCapacity = Math.max(lengthCapacity, (Math.max(minLength, 128) + 127) / 128 * 128);
 			batch = (int) Math.max(SwKernels.GROUP_SIZE, BUFFER_BUDGET / (3L * 4 * lengthCapacity));
 			batch = batch / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE;
 

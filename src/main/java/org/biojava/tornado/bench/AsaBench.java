@@ -36,6 +36,14 @@ public class AsaBench {
 			double[] radii = new double[atoms.length];
 			for (int i = 0; i < atoms.length; i++) radii[i] = AsaCalculator.getRadius(atoms[i]);
 			javax.vecmath.Point3d[] pts = org.biojava.nbio.structure.Calc.atomsToPoints(atoms);
+			String dump = System.getProperty("bench.dump");
+			if (dump != null) {
+				// atoms and BioJava radii, for external tools (e.g. FreeSASA's C API)
+				try (java.io.PrintWriter w = new java.io.PrintWriter(new java.io.File(dump, id + ".xyzr"))) {
+					w.println(atoms.length);
+					for (int i = 0; i < atoms.length; i++) w.printf(java.util.Locale.ROOT, "%.3f %.3f %.3f %.4f%n", pts[i].x, pts[i].y, pts[i].z, radii[i]);
+				}
+			}
 			double lean = Double.MAX_VALUE;
 			double[] leanAsas = null;
 			for (int r = 0; r < reps + 1; r++) {

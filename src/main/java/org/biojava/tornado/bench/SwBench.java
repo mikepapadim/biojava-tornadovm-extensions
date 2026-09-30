@@ -39,6 +39,16 @@ public class SwBench {
 			for (int i = 0; i < seqs.size(); i++)
 				for (int j = i + 1; j < seqs.size(); j++)
 					cells += (long) seqs.get(i).getLength() * seqs.get(j).getLength();
+			String dump = System.getProperty("bench.dump");
+			String tag = spec.replaceAll("[^A-Za-z0-9]+", "_");
+			if (dump != null) {
+				try (java.io.PrintWriter w = new java.io.PrintWriter(new File(dump, tag + ".fasta"))) {
+					for (int i = 0; i < seqs.size(); i++) {
+						w.println(">s" + i);
+						w.println(seqs.get(i).getSequenceAsString());
+					}
+				}
+			}
 			for (String t : types) {
 				PairwiseSequenceScorerType type = PairwiseSequenceScorerType.valueOf(t);
 				double[] ref = null;
@@ -79,6 +89,11 @@ public class SwBench {
 					gpu = Math.min(gpu, (System.nanoTime() - t0) / 1e6);
 				}
 				System.clearProperty(TornadoSupport.PROPERTY);
+				if (dump != null) {
+					try (java.io.PrintWriter w = new java.io.PrintWriter(new File(dump, tag + "." + t + ".scores"))) {
+						for (double v : got) w.println((int) v);
+					}
+				}
 				String parity = "biojava skipped";
 				int leanDiff = 0;
 				for (int k = 0; k < got.length; k++) if (leanScores[k] != got[k]) leanDiff++;
