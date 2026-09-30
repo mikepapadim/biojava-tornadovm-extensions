@@ -17,6 +17,11 @@ On an RTX 4090 against a 32-thread i9-13900K (details and methodology in [FINDIN
 | All-pairs alignment scores, 20k to 2M pairs | **570-700x** (measured up to 40k pairs) | **15-56x** |
 | Small inputs (< ~1k pairs) | the library runs its lean CPU code: 4-6x (ASA), ~25x (alignment) faster than BioJava | - |
 
+Against the reference C libraries on the same inputs (same scores): the GPU is 3-7x faster than
+[parasail](https://github.com/jeffdaily/parasail) (32 threads) for global alignment but only 0.7-2x for local
+alignment, and 8-14x faster than [FreeSASA](https://freesasa.github.io/) for ASA. See FINDINGS.md,
+reproducible with `scripts/external/compare.sh`.
+
 BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a
 TornadoVM runtime, or for small inputs, the classes run the same algorithms in lean Java on all cores. That
 is also exact, and already several times faster than BioJava, so the same code runs everywhere.
