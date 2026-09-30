@@ -15,8 +15,8 @@ public class AsaBench {
 	public static void main(String[] args) throws Exception {
 		int reps = Integer.getInteger("bench.reps", 5);
 		int cores = Runtime.getRuntime().availableProcessors();
-		System.out.printf("%-6s %8s | %10s %10s | %10s %10s %10s | %9s %9s | %s%n", "pdb", "atoms", "cpu1 ms",
-				"cpuN ms", "gpu ms", "(host)", "(tornado)", "vs cpu1", "vs cpuN", "parity");
+		System.out.printf("%-6s %8s | %10s %10s %10s | %10s | %9s %9s %9s | %s%n", "pdb", "atoms", "bj1 ms",
+				"bjN ms", "leanN ms", "gpu ms", "vs bj1", "vs bjN", "vs leanN", "parity");
 		for (String id : args) {
 			Structure s = Structures.load(id);
 			Atom[] atoms = StructureTools.getAllNonHAtomArray(s, false, 0);
@@ -33,6 +33,17 @@ public class AsaBench {
 				new AsaCalculator(atoms, AsaCalculator.DEFAULT_PROBE_SIZE, AsaCalculator.DEFAULT_N_SPHERE_POINTS, cores).calculateAsas();
 				cpuN = Math.min(cpuN, (System.nanoTime() - t) / 1e6);
 			}
+			double[] radii = new double[atoms.length];
+			for (int i = 0; i < atoms.length; i++) radii[i] = AsaCalculator.getRadius(atoms[i]);
+			javax.vecmath.Point3d[] pts = org.biojava.nbio.structure.Calc.atomsToPoints(atoms);
+			double lean = Double.MAX_VALUE;
+			double[] leanAsas = null;
+			for (int r = 0; r < reps + 1; r++) {
+				long t = System.nanoTime();
+				leanAsas = AsaLeanCpu.calculate(pts, radii, AsaCalculator.DEFAULT_PROBE_SIZE, AsaCalculator.DEFAULT_N_SPHERE_POINTS);
+				if (r > 0) lean = Math.min(lean, (System.nanoTime() - t) / 1e6);
+			}
+			if (!java.util.Arrays.equals(ref, leanAsas)) System.out.println("  lean CPU differs from BioJava: " + parity(ref, leanAsas));
 			double[] got = null;
 			double nb = 0, tv = 0;
 			for (int r = 0; r < reps + 1; r++) {
@@ -48,8 +59,8 @@ public class AsaBench {
 					tv = calc.getLastGpuNanos() / 1e6;
 				}
 			}
-			System.out.printf("%-6s %8d | %10.1f %10.1f | %10.1f %10.1f %10.1f | %8.1fx %8.1fx | %s%n", id, atoms.length,
-					cpu1, cpuN, gpu, nb, tv, cpu1 / gpu, cpuN / gpu, parity(ref, got));
+			System.out.printf("%-6s %8d | %10.1f %10.1f %10.1f | %10.1f | %8.1fx %8.1fx %8.1fx | %s%n", id, atoms.length,
+					cpu1, cpuN, lean, gpu, cpu1 / gpu, cpuN / gpu, lean / gpu, parity(ref, got));
 		}
 	}
 

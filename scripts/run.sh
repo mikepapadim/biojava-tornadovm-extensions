@@ -11,4 +11,10 @@ fi
 JVM=()
 while [[ $# -gt 0 && "$1" == -* ]]; do JVM+=("$1"); shift; done
 CP="$ROOT/target/classes:$ROOT/target/test-classes:$(cat "$ROOT/target/cp.txt")"
-exec tornado --jvm="-Xmx24g -Dtornado.device.memory=20GB ${JVM[*]:-}" -cp "$CP" "$@"
+[[ -f "$ROOT/target/junit-platform-console-standalone.jar" ]] && CP="$CP:$ROOT/target/junit-platform-console-standalone.jar"
+MAIN="$1"; shift
+# application arguments go through --params, since the launcher parses any --option itself
+if [[ $# -gt 0 ]]; then
+  exec tornado --jvm="-Xmx24g -Dtornado.device.memory=20GB ${JVM[*]:-}" -cp "$CP" "$MAIN" --params "$*"
+fi
+exec tornado --jvm="-Xmx24g -Dtornado.device.memory=20GB ${JVM[*]:-}" -cp "$CP" "$MAIN"

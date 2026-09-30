@@ -1,0 +1,48 @@
+package org.biojava.tornado.asa;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import org.biojava.nbio.structure.Atom;
+import org.biojava.nbio.structure.Structure;
+import org.biojava.nbio.structure.StructureTools;
+import org.biojava.nbio.structure.asa.AsaCalculator;
+import org.biojava.nbio.structure.asa.GroupAsa;
+import org.biojava.tornado.TestStructures;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+class TornadoAsaCalculatorTest {
+
+	@ParameterizedTest
+	@ValueSource(strings = { "1SMT", "4HHB", "1CDG" })
+	void perAtomAsasAreBitIdentical(String id) throws Exception {
+		Atom[] atoms = StructureTools.getAllNonHAtomArray(TestStructures.load(id), false, 0);
+		double[] expected = new AsaCalculator(atoms, AsaCalculator.DEFAULT_PROBE_SIZE, 1000, 1).calculateAsas();
+		double[] actual = TestStructures.forced(
+				() -> new TornadoAsaCalculator(atoms, AsaCalculator.DEFAULT_PROBE_SIZE, 1000, 1).calculateAsas());
+		assertArrayEquals(expected, actual, 0.0);
+	}
+
+	@ParameterizedTest
+	@ValueSource(ints = { 30, 100, 960 })
+	void otherSpherePointCounts(int nPoints) throws Exception {
+		Atom[] atoms = StructureTools.getAllNonHAtomArray(TestStructures.load("1SMT"), false, 0);
+		double[] expected = new AsaCalculator(atoms, 1.4, nPoints, 1).calculateAsas();
+		double[] actual = TestStructures.forced(() -> new TornadoAsaCalculator(atoms, 1.4, nPoints, 1).calculateAsas());
+		assertArrayEquals(expected, actual, 0.0);
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = { "4HHB" })
+	void groupAsasMatch(String id) throws Exception {
+		Structure s = TestStructures.load(id);
+		GroupAsa[] expected = new AsaCalculator(s, 1.4, 1000, 1, true).getGroupAsas();
+		GroupAsa[] actual = TestStructures.forced(() -> new TornadoAsaCalculator(s, 1.4, 1000, 1, true).getGroupAsas());
+		assertEquals(expected.length, actual.length);
+		for (int i = 0; i < expected.length; i++) {
+			assertEquals(expected[i].getGroup().getResidueNumber(), actual[i].getGroup().getResidueNumber());
+			assertEquals(expected[i].getAsaU(), actual[i].getAsaU(), 0.0);
+		}
+	}
+}
