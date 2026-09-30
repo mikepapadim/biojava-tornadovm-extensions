@@ -251,6 +251,19 @@ public final class TornadoAlignments {
 		int batch = (int) Math.min(nPairs, Math.max(SwKernels.GROUP_SIZE, BUFFER_BUDGET / rowBytes));
 		batch = (batch + SwKernels.GROUP_SIZE - 1) / SwKernels.GROUP_SIZE * SwKernels.GROUP_SIZE;
 
+		synchronized (DEVICE_LOCK) {
+			runBatches(residues, seqStart, subs, k, gapPenalty, local, batch, maxLength, order, pairQuery, pairTarget,
+					result);
+		}
+		return result;
+	}
+
+	/** Serialises the alignment executions on the device. */
+	private static final Object DEVICE_LOCK = new Object();
+
+	private static void runBatches(int[] residues, int[] seqStart, int[] subs, int k, GapPenalty gapPenalty,
+			boolean local, int batch, int maxLength, int[] order, int[] pairQuery, int[] pairTarget, int[] result) {
+		int nPairs = result.length;
 		Batcher batcher = new Batcher(residues, seqStart, subs, k, gapPenalty.getOpenPenalty(),
 				gapPenalty.getExtensionPenalty(), local, batch, maxLength);
 		try {
@@ -264,7 +277,6 @@ public final class TornadoAlignments {
 		} finally {
 			batcher.close();
 		}
-		return result;
 	}
 
 	/** One execution plan, re-executed for every batch of pairs. */

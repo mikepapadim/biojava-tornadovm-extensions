@@ -1,66 +1,143 @@
 # biojava-tornadovm-extensions
 
-GPU acceleration of [BioJava](https://github.com/biojava/biojava) hot loops with
-[TornadoVM](https://github.com/beehive-lab/TornadoVM), as drop-in classes that return
-**exactly the same results** as the BioJava code they replace.
+GPU acceleration of two [BioJava](https://github.com/biojava/biojava) hot spots with
+[TornadoVM](https://github.com/beehive-lab/TornadoVM), as **drop-in classes that return exactly the same
+results** as the BioJava code they replace:
 
-BioJava itself is not modified: this is a separate library, built against BioJava 7.3.0 from
-Maven Central, with TornadoVM (JDK 21) as a `provided` dependency. Without a TornadoVM runtime,
-or for small inputs, every class falls back to the stock BioJava implementation.
+| BioJava class | Drop-in replacement | Result |
+|---|---|---|
+| `org.biojava.nbio.structure.asa.AsaCalculator` | `org.biojava.tornado.asa.TornadoAsaCalculator` | bit-identical per-atom and per-residue ASA |
+| `org.biojava.nbio.alignment.Alignments.getAllPairsScores` / `getAllPairsScorers` (`GLOBAL`, `LOCAL`) | `org.biojava.tornado.align.TornadoAlignments` | identical scores, identical `GuideTree` |
 
-| BioJava | Drop-in | What runs on the GPU | Parity |
-|---|---|---|---|
-| `AsaCalculator` | `TornadoAsaCalculator` | neighbour search + Shrake-Rupley sphere-point occlusion, fused, one work-group per atom | bit-identical per-atom ASA (double precision, BioJava operation order) |
-| `Alignments.getAllPairsScores` / `getAllPairsScorers` | `TornadoAlignments` | batched all-pairs Needleman-Wunsch / Smith-Waterman scores, affine gaps, one pair per thread, strip-mined | identical integer scores; identical `GuideTree` |
+On an RTX 4090 against a 32-thread i9-13900K (details and methodology in [FINDINGS.md](FINDINGS.md)):
 
-Measured speedups and methodology: see [FINDINGS.md](FINDINGS.md).
+| Workload | vs BioJava today | vs the same algorithm in lean Java on all 32 cores |
+|---|---|---|
+| ASA, 59k to 2.4M atoms | **11-17x** | 2.3-3.4x |
+| All-pairs alignment scores, 20k to 2M pairs | **117-174x** (measured up to 40k pairs) | **4-34x** |
+| Small inputs (< ~2k atoms, < ~1k pairs) | still faster than BioJava | CPU is faster: stay on CPU |
 
-## Usage
+BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a
+TornadoVM runtime, or for small inputs, every class calls the stock BioJava implementation, so the same
+code runs everywhere.
+
+---
+
+## For BioJava users
+
+### 1. Add the library
+
+It is not on Maven Central yet: install it locally (JDK 21 and Maven):
+
+```bash
+git clone https://github.com/mikepapadim/biojava-tornadovm-extensions.git
+cd biojava-tornadovm-extensions && mvn -q install -DskipTests
+```
+
+```xml
+<dependency>
+  <groupId>org.biojava.tornado</groupId>
+  <artifactId>biojava-tornadovm-extensions</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+It brings BioJava 7.3.0 (`biojava-structure`, `biojava-alignment`) with it. The TornadoVM API is a
+`provided` dependency: at run time it comes from the TornadoVM SDK (step 3), so your application must
+not bundle `tornado-api` itself.
+
+### 2. Change one line
 
 ```java
-// ASA: same constructors and methods as AsaCalculator
-double[] asas = new TornadoAsaCalculator(structure, AsaCalculator.DEFAULT_PROBE_SIZE,
-        AsaCalculator.DEFAULT_N_SPHERE_POINTS, nThreads, false).calculateAsas();
+// before: new AsaCalculator(structure, AsaCalculator.DEFAULT_PROBE_SIZE, 1000, nThreads, false)
+TornadoAsaCalculator asa = new TornadoAsaCalculator(structure, AsaCalculator.DEFAULT_PROBE_SIZE,
+        AsaCalculator.DEFAULT_N_SPHERE_POINTS, nThreads, false);
+double[] perAtom = asa.calculateAsas();       // same as AsaCalculator.calculateAsas()
+GroupAsa[] perResidue = asa.getGroupAsas();   // same as AsaCalculator.getGroupAsas()
+```
 
-// All-pairs scores (GLOBAL or LOCAL), same order as Alignments.getAllPairsScores
+The constructors mirror all of `AsaCalculator`'s: `Structure`, `Atom[]`, and `Point3d[]` with a fixed radius.
+
+```java
+// before: Alignments.getAllPairsScores(seqs, PairwiseSequenceScorerType.GLOBAL, gaps, matrix)
 double[] scores = TornadoAlignments.getAllPairsScores(seqs, PairwiseSequenceScorerType.GLOBAL,
         new SimpleGapPenalty(), SubstitutionMatrixHelper.getBlosum62());
 
-// ... or as scorers for a guide tree
-GuideTree<ProteinSequence, AminoAcidCompound> tree = new GuideTree<>(seqs,
-        TornadoAlignments.getAllPairsScorers(seqs, PairwiseSequenceScorerType.GLOBAL, gaps, blosum62));
+// before: Alignments.getAllPairsScorers(...) + Alignments.runPairwiseScorers(...)
+List<PairwiseSequenceScorer<ProteinSequence, AminoAcidCompound>> scorers =
+        TornadoAlignments.getAllPairsScorers(seqs, PairwiseSequenceScorerType.GLOBAL, gaps, matrix);
+GuideTree<ProteinSequence, AminoAcidCompound> tree = new GuideTree<>(seqs, scorers);  // unchanged BioJava
 ```
 
-## Quick start
+Scores come in BioJava's order (pairs (i, j), i < j). The scorers carry the same score, max, min and
+distance as BioJava's aligners, so anything built on them (guide trees, clustering) is unchanged. It works for
+any compound set and substitution matrix (proteins, DNA with NUC.4.4, ambiguity codes).
 
-Needs Linux x86-64, JDK 21, Maven and an NVIDIA GPU (or `TORNADO_BACKEND=opencl`).
+### 3. Run with TornadoVM
+
+Get a TornadoVM 7.0.1 SDK for JDK 21 from the
+[releases](https://github.com/beehive-lab/TornadoVM/releases/tag/v7.0.1)
+(`tornadovm-7.0.1-jdk21-cuda-linux-amd64` for NVIDIA, `-opencl-` for AMD/Intel, `-metal-mac-aarch64` for
+Apple), or let `source scripts/env.sh` download it into `.tornado/`. Then start your application with
+the SDK's argument file, on JDK 21:
 
 ```bash
-./bench.sh          # downloads TornadoVM 7.0.1 into .tornado/, the PDB files, builds,
-                    # runs the GPU parity tests and both benchmarks
-./bench.sh asa      # or one benchmark: asa | sw
+export TORNADO_SDK=/path/to/tornadovm-7.0.1-cuda
+java @$TORNADO_SDK/tornado-argfile -cp my-app.jar:<dependencies> com.example.Main
+# or, equivalently: $TORNADO_SDK/bin/tornado -cp ... com.example.Main
 ```
 
-Any class of the project runs under TornadoVM with `scripts/run.sh <main-class> [args]`.
-`scripts/env.sh` picks the JDK 21 and the SDK (set `TORNADO_SDK` to use an existing one).
-Note that the `tornado` launcher prefers `TORNADOVM_HOME` over `TORNADO_SDK`: a stale
-`TORNADOVM_HOME` (e.g. from sdkman) silently runs a different SDK.
+Started with plain `java` (no argument file), the same program runs and uses the BioJava CPU code.
 
-## When the GPU is used
+### When the GPU is used
 
-* Only under a TornadoVM runtime; `-Dbiojava.tornado=off` disables it, `-Dbiojava.tornado=force`
-  ignores the size thresholds.
-* Size thresholds (below them the CPU path is used): ASA 1000 atoms, all-pairs scores 5e7 DP cells in total.
-* Not accelerated (always CPU): `*_IDENTITIES` /
-  `*_SIMILARITIES` scorer types (they need a traceback); linear gap penalties.
-* Any TornadoVM failure logs a warning, disables the GPU path for the rest of the run and falls
-  back to BioJava.
-* Each kernel is JIT-compiled once per JVM (~0.5 s) into a persistent execution plan that is
-  re-executed for every later call; only the first call pays for it.
+| | ASA | All-pairs scores |
+|---|---|---|
+| GPU from | 1,000 atoms | 5e7 DP cells in total (about 2k pairs of 150 aa) |
+| always CPU | - | `*_IDENTITIES`, `*_SIMILARITIES` (need a traceback), `KMERS`, `WU_MANBER`; linear gap penalties |
 
-## Tests
+* `-Dbiojava.tornado=off` forces the CPU path, and `-Dbiojava.tornado=force` ignores the thresholds.
+* If a kernel fails (no device, out of memory, driver error), a warning is logged, the GPU path is
+  disabled for the rest of the run, and the call is answered by BioJava.
+* The first GPU call in a JVM compiles the kernel (about 0.5 s). ASA then re-executes a cached execution
+  plan (under 1 ms of overhead per call); all-pairs scoring currently builds its plan per call (about 20 ms).
+* Thread safety: calls are serialised on the device and are safe from several threads.
+
+---
+
+## For developers
+
+```
+src/main/java/org/biojava/tornado/
+  TornadoSupport.java        GPU on/off, size thresholds, fallback
+  asa/AsaKernels.java        fused kernel: cell-grid neighbour search, rank sort, occlusion test
+  asa/TornadoAsaCalculator   host side, persistent capacity-padded execution plan
+  align/SwKernels.java       strip-mined affine-gap NW/SW score kernel (one pair per thread)
+  align/TornadoAlignments    encoding, cost-sorted batching, PrecomputedScorer
+  bench/                     AsaBench, SwBench and the lean CPU baselines (AsaLeanCpu, CpuScores)
+src/test/java/               parity tests: GPU result == BioJava result, exactly
+```
+
+Principles, which any new kernel should follow:
+* **Exact parity.** The kernels reproduce BioJava's arithmetic: double precision in BioJava's
+  operation order for ASA, and the same integer recurrences and boundary rules (`AlignerHelper`) for
+  alignment. Tests compare with `assertArrayEquals(expected, actual, 0.0)`.
+* **Drop-in API and fallback.** Same constructors and methods as the BioJava class; delegate to BioJava
+  below a size threshold, without TornadoVM, and on any failure.
+* **Fair benchmarks.** Report the speedup against BioJava *and* against the same algorithm in lean Java
+  on all cores.
 
 ```bash
-mvn test              # plain JVM: exercises the CPU fallbacks
-scripts/test-gpu.sh   # under TornadoVM: GPU results vs BioJava, exact equality
+./bench.sh                  # one command: TornadoVM SDK + data + build + GPU tests + benchmarks
+./bench.sh asa | sw         # one benchmark
+mvn test                    # plain JVM: exercises the CPU fallbacks
+scripts/test-gpu.sh         # JUnit under TornadoVM: GPU results vs BioJava
+scripts/run.sh <main> args  # run any class under TornadoVM
 ```
+
+`scripts/env.sh` needs JDK 21 (`JAVA_HOME`) and uses `TORNADO_SDK` if set, else downloads the SDK
+(`TORNADO_BACKEND=cuda|opencl`). Note that the `tornado` launcher prefers `TORNADOVM_HOME` over
+`TORNADO_SDK`, so a stale `TORNADOVM_HOME` (for example from sdkman) silently runs another SDK; the scripts set both.
+
+Hot spots investigated and not included are in [FINDINGS.md](FINDINGS.md) (CE structure alignment, and the
+CUDA library bindings).

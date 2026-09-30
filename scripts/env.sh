@@ -17,7 +17,7 @@ export JAVA_HOME
 if [[ -z "${TORNADO_SDK:-}" ]]; then
   _backend="${TORNADO_BACKEND:-cuda}"
   _name="tornadovm-$TORNADO_VERSION-jdk21-$_backend-linux-amd64"
-  TORNADO_SDK="$_root/.tornado/tornadovm-$TORNADO_VERSION-jdk21-$_backend"
+  TORNADO_SDK="$_root/.tornado/tornadovm-$TORNADO_VERSION-$_backend"
   if [[ ! -x "$TORNADO_SDK/bin/tornado" ]]; then
     echo "Downloading $_name ..." >&2
     mkdir -p "$_root/.tornado"
