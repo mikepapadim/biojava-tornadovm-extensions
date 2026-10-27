@@ -1,8 +1,8 @@
-# Source me. Selects JDK 21 and a TornadoVM 7.0.1 SDK; downloads the SDK into .tornado/ if none is given.
+# Source me. Selects JDK 21 and a TornadoVM 8.0.0 SDK; downloads the SDK into .tornado/ if none is given.
 #   JAVA_HOME          a JDK 21 (default: $JAVA_HOME if it is 21, else sdkman's 21.0.2-open)
-#   TORNADO_SDK        an existing TornadoVM 7.0.1 JDK 21 SDK (optional)
+#   TORNADO_SDK        an existing TornadoVM 8.0.0 JDK 21 SDK (optional)
 #   TORNADO_BACKEND    cuda (default) or opencl, for the downloaded SDK
-TORNADO_VERSION=7.0.1
+TORNADO_VERSION=8.0.0
 _root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ -z "${JAVA_HOME:-}" ]] || ! "$JAVA_HOME/bin/java" -version 2>&1 | grep -q '"21\.'; then

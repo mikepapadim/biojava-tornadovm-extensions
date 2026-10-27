@@ -96,17 +96,22 @@ any compound set and substitution matrix (proteins, DNA with NUC.4.4, ambiguity 
 
 ### 3. Run with TornadoVM
 
-Get a TornadoVM 7.0.1 SDK for JDK 21 from the
-[releases](https://github.com/beehive-lab/TornadoVM/releases/tag/v7.0.1)
-(`tornadovm-7.0.1-jdk21-cuda-linux-amd64` for NVIDIA, `-opencl-` for AMD/Intel, `-metal-mac-aarch64` for
+Get a TornadoVM 8.0.0 SDK for JDK 21 from the
+[releases](https://github.com/beehive-lab/TornadoVM/releases/tag/v8.0.0)
+(`tornadovm-8.0.0-jdk21-cuda-linux-amd64` for NVIDIA, `-opencl-` for AMD/Intel, `-metal-mac-aarch64` for
 Apple), or let `source scripts/env.sh` download it into `.tornado/`. Then start your application with
-the SDK's argument file, on JDK 21:
+the SDK's JVM options, on JDK 21:
 
 ```bash
-export TORNADO_SDK=/path/to/tornadovm-7.0.1-cuda
-java @$TORNADO_SDK/tornado-argfile -cp my-app.jar:<dependencies> com.example.Main
-# or, equivalently: $TORNADO_SDK/bin/tornado -cp ... com.example.Main
+export TORNADOVM_HOME=/path/to/tornadovm-8.0.0-cuda
+# the SDK's options (module path, exports, native libraries), with its location filled in
+sed "s|\${TORNADOVM_HOME}|$TORNADOVM_HOME|g" $TORNADOVM_HOME/tornado-argfile.template > tornado.args
+java @tornado.args -cp my-app.jar:<dependencies> com.example.Main
 ```
+
+`scripts/run.sh` does exactly this for the classes of this project. The SDK puts its own JUnit (6.x)
+on the module path, so tests run under TornadoVM use it rather than a second JUnit on the class path
+(see `scripts/test-gpu.sh`).
 
 Started with plain `java` (no argument file), the same program runs on the lean CPU path.
 

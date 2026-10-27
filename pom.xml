@@ -16,7 +16,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>21</maven.compiler.release>
     <biojava.version>7.3.0</biojava.version>
-    <tornado.version>7.0.1-jdk21</tornado.version>
+    <tornado.version>8.0.0-jdk21</tornado.version>
   </properties>
 
   <dependencies>
