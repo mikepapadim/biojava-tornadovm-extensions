@@ -42,6 +42,34 @@ FP64, so ASA uses the exact single-precision path). All tests give exact results
 BioJava is not modified. This library is built against BioJava 7.3.0 from Maven Central. Without a TornadoVM
 runtime, or for small inputs, the classes run the lean Java path, which is also exact.
 
+**Re-measured with TornadoVM 8.0.0** (`./bench.sh`, CUDA backend, same machine; 23/23 GPU parity tests pass on
+CUDA and OpenCL): ASA 0.8 ms (1SMT) to 373 ms (3J3Q), 14.7-42.3x single-threaded BioJava and 2.1-3.1x lean Java;
+all-pairs global 200 proteins 17.0 ms (586x BioJava, 24.5x lean Java), local 17.0 ms (615x, 17.2x); 500k pairs
+up to 253 GCUPS. Pfam PF00104 global took 13.9 ms on 8.0.0 against 9 ms in the table above (7.0.1); not
+investigated yet.
+
+---
+
+## Quick start
+
+With [SDKMAN](https://sdkman.io), on Linux with an NVIDIA GPU (for AMD or Intel GPUs, use
+`8.0.0-jdk21-opencl` and `TORNADO_BACKEND=opencl`):
+
+```bash
+curl -s "https://get.sdkman.io" | bash && source ~/.sdkman/bin/sdkman-init.sh   # if you have no SDKMAN yet
+sdk install java 21.0.2-open
+sdk install tornadovm 8.0.0-jdk21-cuda         # "n" when asked to make it the default is fine
+
+git clone https://github.com/mikepapadim/biojava-tornadovm-extensions.git
+cd biojava-tornadovm-extensions
+./bench.sh            # builds, runs the GPU parity tests, then the ASA and alignment benchmarks
+```
+
+The scripts find TornadoVM 8.0.0 in SDKMAN by its version, whatever your default is, and install it
+with `sdk install` if it is missing. Without SDKMAN they download the SDK from the GitHub release into
+`.tornado/`. `tornado --devices` lists the devices; `-Dasa.fused.device=<driver>:<device>` and
+`-Dsw.scores.device=<driver>:<device>` pick the device of the ASA and alignment kernels (default: TornadoVM's default device).
+
 ---
 
 ## For BioJava users
@@ -96,17 +124,24 @@ any compound set and substitution matrix (proteins, DNA with NUC.4.4, ambiguity 
 
 ### 3. Run with TornadoVM
 
-Get a TornadoVM 7.0.1 SDK for JDK 21 from the
-[releases](https://github.com/beehive-lab/TornadoVM/releases/tag/v7.0.1)
-(`tornadovm-7.0.1-jdk21-cuda-linux-amd64` for NVIDIA, `-opencl-` for AMD/Intel, `-metal-mac-aarch64` for
-Apple), or let `source scripts/env.sh` download it into `.tornado/`. Then start your application with
-the SDK's argument file, on JDK 21:
+Install TornadoVM 8.0.0 for JDK 21 with SDKMAN (`8.0.0-jdk21-cuda` for NVIDIA, `8.0.0-jdk21-opencl` for
+AMD and Intel GPUs), or take the same SDK from the
+[release](https://github.com/beehive-lab/TornadoVM/releases/tag/v8.0.0). Then start your application on
+JDK 21 with the SDK's JVM options:
 
 ```bash
-export TORNADO_SDK=/path/to/tornadovm-7.0.1-cuda
-java @$TORNADO_SDK/tornado-argfile -cp my-app.jar:<dependencies> com.example.Main
-# or, equivalently: $TORNADO_SDK/bin/tornado -cp ... com.example.Main
+sdk install java 21.0.2-open
+sdk install tornadovm 8.0.0-jdk21-cuda
+export JAVA_HOME=$HOME/.sdkman/candidates/java/21.0.2-open
+export TORNADOVM_HOME=$HOME/.sdkman/candidates/tornadovm/8.0.0-jdk21-cuda
+# the SDK's options (module path, exports, native libraries), with its location filled in
+sed "s|\${TORNADOVM_HOME}|$TORNADOVM_HOME|g" $TORNADOVM_HOME/tornado-argfile.template > tornado.args
+$JAVA_HOME/bin/java @tornado.args -cp my-app.jar:<dependencies> com.example.Main
 ```
+
+`scripts/run.sh` does exactly this for the classes of this project. The SDK puts its own JUnit (6.x)
+on the module path, so tests run under TornadoVM use it rather than a second JUnit on the class path
+(see `scripts/test-gpu.sh`).
 
 Started with plain `java` (no argument file), the same program runs on the lean CPU path.
 
@@ -161,7 +196,8 @@ scripts/test-gpu.sh         # JUnit under TornadoVM: GPU results vs BioJava
 scripts/run.sh <main> args  # run any class under TornadoVM
 ```
 
-`scripts/env.sh` needs JDK 21 (`JAVA_HOME`) and uses `TORNADO_SDK` if set, else downloads the SDK
+`scripts/env.sh` needs JDK 21 (`JAVA_HOME`, else SDKMAN's `21.0.2-open`) and uses `TORNADO_SDK` if set,
+else SDKMAN's `tornadovm 8.0.0-jdk21-<backend>` (installed if missing), else downloads the release SDK
 (`TORNADO_BACKEND=cuda|opencl`). Note that the `tornado` launcher prefers `TORNADOVM_HOME` over
 `TORNADO_SDK`, so a stale `TORNADOVM_HOME` (for example from sdkman) silently runs another SDK; the scripts set both.
 
